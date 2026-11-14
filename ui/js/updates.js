@@ -195,6 +195,15 @@
     document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !back.hidden) close(); });
 
     migrateSkip();
+
+    function openDialog() {
+      run(false);
+    }
+    if (tauri.event) {
+      tauri.event.listen('open-update', () => { openDialog(); }).catch(() => {});
+    }
+    invoke('take_open_update_dialog').then((open) => { if (open) openDialog(); }).catch(() => {});
+    window.updates.openDialog = openDialog;
   }
 
   window.updates = { attach, sync };

@@ -213,6 +213,27 @@ fn set_update_skipped(state: State<'_, Arc<AppState>>, version: String) {
     state.set_update_skipped(version);
 }
 
+#[tauri::command]
+fn set_update_dismissed(state: State<'_, Arc<AppState>>, version: String) {
+    state.set_update_dismissed(version);
+}
+
+/// Open the detailed meter and its update dialog. Nothing is downloaded.
+#[tauri::command]
+async fn open_update_dialog(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.set_open_update_dialog(true);
+    show_meter(&app).map_err(|err| err.to_string())?;
+    if let Some(window) = app.get_webview_window(METER) {
+        let _ = window.emit("open-update", ());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn take_open_update_dialog(state: State<'_, Arc<AppState>>) -> bool {
+    state.take_open_update_dialog()
+}
+
 /// Either value may be left out.
 #[tauri::command]
 fn set_pet_toasts(state: State<'_, Arc<AppState>>, on: Option<bool>, secs: Option<u64>) -> Result<(), String> {
@@ -1219,6 +1240,9 @@ fn main() {
             set_pop_up_on_boss,
             set_check_updates_automatically,
             set_update_skipped,
+            set_update_dismissed,
+            open_update_dialog,
+            take_open_update_dialog,
             set_overlay_click_through,
             set_hidden_cube_alerts,
             set_pet_toasts,

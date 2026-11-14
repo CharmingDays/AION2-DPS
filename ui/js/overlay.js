@@ -138,6 +138,7 @@
     const f = fightState(data);
 
     $('dot').className = f.live ? 'dot live' : 'dot';
+    paintUpdate(data);
     $('target').textContent = f.target;
     naming.update(data, f);
     paintBoss(m);
@@ -361,6 +362,45 @@
   // Same as Reset fight in the detailed meter: ends any boss lock and archives the fight.
   $('reset').addEventListener('click', () => bridge.reset().catch(showError));
   $('open-meter').addEventListener('click', () => bridge.openMeter());
+
+  let dismissed = '';
+  function paintUpdate(data) {
+    const ver = data && data.update_overlay;
+    const on = Boolean(ver) && ver !== dismissed;
+    const label = on ? `v${ver} available` : '';
+    const brand = $('update-brand');
+    const dot = $('update-dot');
+    const strip = $('update-strip');
+    const open = $('update-open');
+    if (brand) brand.hidden = !on;
+    if (dot) {
+      dot.hidden = !on;
+      dot.title = label;
+    }
+    if (strip) strip.hidden = !on;
+    if (open) open.textContent = label || 'Update available';
+  }
+  function openUpdate() {
+    if (bridge.inApp && bridge.openUpdateDialog) {
+      bridge.openUpdateDialog().catch(() => bridge.openMeter());
+    } else {
+      bridge.openMeter();
+    }
+  }
+  function dismissUpdate() {
+    const ver = latest && latest.update_overlay;
+    if (ver) dismissed = ver;
+    paintUpdate(latest);
+    if (ver && bridge.setUpdateDismissed) {
+      bridge.setUpdateDismissed(ver).catch(() => {});
+    }
+  }
+  $('update-dot').addEventListener('click', openUpdate);
+  $('update-open').addEventListener('click', openUpdate);
+  $('update-hide').addEventListener('click', (event) => {
+    event.stopPropagation();
+    dismissUpdate();
+  });
   window.addEventListener('keydown', (event) => {
     if (event.ctrlKey || event.altKey || event.metaKey || naming.editing()) return;
     if (event.key === '-' || event.code === 'NumpadSubtract') stepOpacity(-1);
