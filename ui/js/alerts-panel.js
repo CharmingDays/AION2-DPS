@@ -194,12 +194,19 @@
       }
       render();
     });
+    // The editor treats a non-empty return as an error to show in red.
+    // A successful save writes a green 'Saved' into [data-note], so only
+    // pass that text through when it is not marked ok.
+    const noteError = () => {
+      const n = q('[data-note]');
+      return n.classList.contains('ok') ? '' : (n.textContent || '');
+    };
     const editor = createEditor({
       save: (alert, isNew) => save((s) => {
         if (isNew) s.alerts.push(alert);
         else s.alerts = s.alerts.map((a) => (a.id === alert.id ? alert : a));
-      }).then(() => q('[data-note]').textContent),
-      remove: (id) => save((s) => { s.alerts = s.alerts.filter((a) => a.id !== id); }).then(() => q('[data-note]').textContent),
+      }).then(noteError),
+      remove: (id) => save((s) => { s.alerts = s.alerts.filter((a) => a.id !== id); }).then(noteError),
       defaults: () => (settings ? settings.lead_mins : [5]),
       settings: () => settings,
     });
