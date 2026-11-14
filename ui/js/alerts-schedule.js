@@ -10,9 +10,12 @@
 // in step with `time`, nothing meant daily. Without `start_date` the steps
 // keep that old meaning: in step with `time` on any day.
 // `clock` says which clock `time` and `start_date` are in: missing or
-// 'local' is this PC, 'server' is the game server at the settings'
-// `server_utc_offset_mins` (default UTC+9), 'utc' is UTC. Times returned are
-// always real instants (ms), so the pages show them in local time.
+// 'local' is this PC, 'utc' is UTC, 'server' is the game server. Named
+// regions (NA West, NA East, Europe) use an IANA timezone and follow
+// daylight saving; unset region is treated as NA West; Custom (or a
+// leftover file with only `server_utc_offset_mins` and region "custom")
+// uses that fixed offset. Times returned are always real instants (ms),
+// so the pages show them in local time.
 (function (root) {
   const MINUTE = 60_000;
   const DAY = 24 * 60 * MINUTE;
@@ -42,12 +45,96 @@
     dayOf: (ms) => { const t = new Date(ms); return [t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()]; },
     weekday: (ms) => (new Date(ms).getUTCDay() + 6) % 7,
   };
-  const DEFAULT_SERVER_OFFSET_MINS = 540;
+  const DEFAULT_SERVER_OFFSET_MINS = -8 * 60;
+  const DEFAULT_ZONE = 'America/Los_Angeles';
 
-  /** Minutes east of UTC the alert's clock runs at, or null for local time. */
+  /** Named Global regions and the IANA zone each one uses for server time. */
+  const REGIONS = [
+    { id: 'na-west', label: 'NA West', zone: 'America/Los_Angeles' },
+    { id: 'na-east', label: 'NA East', zone: 'America/New_York' },
+    { id: 'europe', label: 'Europe', zone: 'Europe/Berlin' },
+    { id: 'custom', label: 'Custom', zone: null },
+  ];
+
+  const regionOf = (settings) => {
+    const id = settings && settings.region;
+    return REGIONS.find((r) => r.id === id) || null;
+  };
+
+  const regionLabel = (id) => (REGIONS.find((r) => r.id === id) || {}).label || '';
+
+  /** IANA zone for server-clock events, or null when a fixed offset is used. */
+  function serverZone(settings) {
+    const region = regionOf(settings);
+    if (region && region.id === 'custom') return null;
+    return (region && region.zone) || DEFAULT_ZONE;
+  }
+
+  /** Minutes east of UTC at `utcMs` in `timeZone`. */
+  function zoneOffsetMins(utcMs, timeZone) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      timeZoneName: 'longOffset',
+      hourCycle: 'h23',
+    }).formatToParts(new Date(utcMs));
+    const name = (parts.find((p) => p.type === 'timeZoneName') || {}).value || '';
+    const m = /([+-])(\d{1,2})(?::(\d{2}))?/.exec(name);
+    if (!m) return 0;
+    return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] || 0));
+  }
+
+  /** Calendar date `[y, monthIndex, d]` of `utcMs` in `timeZone`. */
+  function zoneDayOf(utcMs, timeZone) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(new Date(utcMs));
+    const get = (t) => Number((parts.find((p) => p.type === t) || {}).value);
+    return [get('year'), get('month') - 1, get('day')];
+  }
+
+  function zoneWeekday(utcMs, timeZone) {
+    const wd = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' }).format(new Date(utcMs));
+    return { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 }[wd] ?? 0;
+  }
+
+  /** UTC instant of a wall-clock time on a calendar day in `timeZone`. */
+  function zonedLocalToUtc(y, mo, d, minutes, timeZone) {
+    const utcGuess = Date.UTC(y, mo, d, Math.floor(minutes / 60), minutes % 60);
+    const first = zoneOffsetMins(utcGuess, timeZone);
+    const utc = utcGuess - first * MINUTE;
+    const second = zoneOffsetMins(utc, timeZone);
+    return second === first ? utc : utcGuess - second * MINUTE;
+  }
+
+  function zoneCal(timeZone) {
+    return {
+      atDay(ms, minutes) {
+        const [y, mo, d] = zoneDayOf(ms, timeZone);
+        return zonedLocalToUtc(y, mo, d, minutes, timeZone);
+      },
+      onDay([y, mo, d], days, minutes) {
+        const t = new Date(Date.UTC(y, mo, d + days));
+        return zonedLocalToUtc(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate(), minutes, timeZone);
+      },
+      dayOf: (ms) => zoneDayOf(ms, timeZone),
+      weekday: (ms) => zoneWeekday(ms, timeZone),
+    };
+  }
+
+  /**
+   * Minutes east of UTC the alert's clock runs at, or null for local time.
+   * For named regions this is the zone's offset *right now*; prefer `nextAt`
+   * for DST-safe scheduling.
+   */
   function offsetOf(alert, settings) {
     if (alert.clock === 'utc') return 0;
     if (alert.clock === 'server') {
+      const zone = serverZone(settings);
+      if (zone) return zoneOffsetMins(Date.now(), zone);
       const off = settings && Number.isFinite(Number(settings.server_utc_offset_mins)) ? Number(settings.server_utc_offset_mins) : DEFAULT_SERVER_OFFSET_MINS;
       return off;
     }
@@ -96,11 +183,19 @@
    * `settings` gives the server clock for `clock: 'server'` alerts.
    */
   function nextAt(alert, after, settings) {
-    const off = offsetOf(alert, settings);
-    if (off == null) return nextIn(LOCAL, alert, after);
-    const shift = off * MINUTE;
-    const at = nextIn(UTC, alert, after + shift);
-    return at == null ? null : at - shift;
+    if (alert.clock === 'utc') {
+      const at = nextIn(UTC, alert, after);
+      return at;
+    }
+    if (alert.clock === 'server') {
+      const zone = serverZone(settings);
+      if (zone) return nextIn(zoneCal(zone), alert, after);
+      const off = settings && Number.isFinite(Number(settings.server_utc_offset_mins)) ? Number(settings.server_utc_offset_mins) : DEFAULT_SERVER_OFFSET_MINS;
+      const shift = off * MINUTE;
+      const at = nextIn(UTC, alert, after + shift);
+      return at == null ? null : at - shift;
+    }
+    return nextIn(LOCAL, alert, after);
   }
 
   function nextIn(cal, alert, after) {
@@ -227,7 +322,7 @@
     return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
   }
 
-  const api = { MINUTE, IMMINENT_MS, WEEKDAYS, DEFAULT_SERVER_OFFSET_MINS, offsetOf, offsetLabel, parseTime, parseDate, repeatOf, nextAt, due, countdown, repeatShort, repeatSummary, repeatError };
+  const api = { MINUTE, IMMINENT_MS, WEEKDAYS, DEFAULT_SERVER_OFFSET_MINS, DEFAULT_ZONE, REGIONS, regionOf, regionLabel, serverZone, zoneOffsetMins, offsetOf, offsetLabel, parseTime, parseDate, repeatOf, nextAt, due, countdown, repeatShort, repeatSummary, repeatError };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.alertSchedule = api;
 })(typeof window !== 'undefined' ? window : globalThis);

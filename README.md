@@ -12,7 +12,7 @@ A passive, listen-only DPS meter for AION 2 with a compact overlay, a detailed m
 - **Detailed meter**: players table (damage, DPS, share, crit %), damage by skill, recent hits and finished pulls. Opens as an app window or at `http://127.0.0.1:18732/` in any browser.
 - **Session history and replay**: save a fight, then replay it at 1x, 2x or 4x with a damage-over-time chart. Export or delete sessions.
 - **Heals and ability share** views.
-- **Event timers**: default AION 2 event timers you can edit, switch off or delete, with a "Restore default timers" button. Local, server or UTC clock.
+- **Event timers**: default AION 2 event timers you can edit, switch off or delete, with a "Restore default timers" button. Pick your region (NA West, NA East or Europe) so server times follow that timezone, including daylight saving; or use a custom UTC offset. Local, server or UTC clock.
 - **Boss detection**: from the bundled NPC table, or once a target takes 1,500,000 player damage (adjustable).
 - **Kill detection**: a *Defeated* badge when a monster dies.
 - **Boss lock**: the view stays on the boss while you fight it and for 10 s after it dies (adjustable, 0 to 60 s), so adds don't replace it. Other hits are still recorded.

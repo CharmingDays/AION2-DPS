@@ -107,27 +107,43 @@ test('repeat summaries and errors read like the design', () => {
 
 test('server and UTC clocks fire at the real instant, whatever the PC zone', () => {
   const u = (d, h, m) => Date.UTC(2026, 10, d, h, m);
-  const settings = { server_utc_offset_mins: 540 };
+  const custom = { region: 'custom', server_utc_offset_mins: 540 };
   // Daily reset 07:00 UTC.
   const reset = { id: 'r', name: 'Reset', time: '07:00', clock: 'utc', repeat: { type: 'daily', every: 1 } };
-  assert.strictEqual(s.nextAt(reset, u(4, 6, 0), settings), u(4, 7, 0));
-  assert.strictEqual(s.nextAt(reset, u(4, 7, 0), settings), u(5, 7, 0));
-  // Watcher Kaira every 3 h from 01:00 server (UTC+9) = 16:00 UTC, 19:00 UTC, ...
+  assert.strictEqual(s.nextAt(reset, u(4, 6, 0), custom), u(4, 7, 0));
+  assert.strictEqual(s.nextAt(reset, u(4, 7, 0), custom), u(5, 7, 0));
+  // Fixed Custom offset UTC+9: 01:00 server = 16:00 UTC, then 19:00 UTC.
   const kaira = { id: 'k', name: 'Kaira', time: '01:00', clock: 'server', repeat: { type: 'hours', every: 3 } };
-  assert.strictEqual(s.nextAt(kaira, u(4, 15, 0), settings), u(4, 16, 0));
-  assert.strictEqual(s.nextAt(kaira, u(4, 16, 0), settings), u(4, 19, 0));
-  assert.strictEqual(s.nextAt(kaira, u(4, 16, 0), { server_utc_offset_mins: -300 }), u(4, 18, 0), 'UTC-5: 01:00 = 06:00 UTC, steps of 3 h');
+  assert.strictEqual(s.nextAt(kaira, u(4, 15, 0), custom), u(4, 16, 0));
+  assert.strictEqual(s.nextAt(kaira, u(4, 16, 0), custom), u(4, 19, 0));
+  assert.strictEqual(s.nextAt(kaira, u(4, 16, 0), { region: 'custom', server_utc_offset_mins: -300 }), u(4, 18, 0), 'UTC-5: 01:00 = 06:00 UTC, steps of 3 h');
   // Weekly Fri, Sun 21:00 server: Wed Nov 4 2026 -> Fri Nov 6 21:00 KST = 12:00 UTC.
   const nahma = { id: 'n', name: 'Nahma', time: '21:00', clock: 'server', repeat: { type: 'weekly', days: [4, 6] } };
-  assert.strictEqual(s.nextAt(nahma, u(4, 0, 0), settings), u(6, 12, 0));
+  assert.strictEqual(s.nextAt(nahma, u(4, 0, 0), custom), u(6, 12, 0));
   // Hourly at :30.
   const raid = { id: 'b', name: 'Raid', time: '00:30', clock: 'server', repeat: { type: 'hours', every: 1 } };
-  assert.strictEqual(s.nextAt(raid, u(4, 10, 31), settings), u(4, 11, 30));
-  // No settings: UTC+9.
-  assert.strictEqual(s.nextAt(kaira, u(4, 15, 0)), u(4, 16, 0));
+  assert.strictEqual(s.nextAt(raid, u(4, 10, 31), custom), u(4, 11, 30));
   assert.strictEqual(s.offsetLabel(540), 'UTC+9');
   assert.strictEqual(s.offsetLabel(-330), 'UTC-5:30');
   assert.strictEqual(s.repeatShort(nahma), 'Weekly on Fri, Sun 21:00 (server)');
+});
+
+test('named regions use DST-aware zones; unset defaults to NA West', () => {
+  const u = (d, h, m) => Date.UTC(2026, 10, d, h, m);
+  // Sat Nov 14 2026 is standard time. A 13:00 PT rift is 21:00 UTC.
+  const rift = { id: 'r', name: 'Rift', time: '01:00', clock: 'server', repeat: { type: 'hours', every: 3 } };
+  const west = { region: 'na-west' };
+  assert.strictEqual(s.nextAt(rift, u(14, 20, 33), west), u(14, 21, 0));
+  assert.strictEqual(s.nextAt(rift, u(14, 20, 33), {}), u(14, 21, 0), 'unset region uses NA West');
+  // Siege Saturday 17:00 PT = Sunday 01:00 UTC.
+  const siege = { id: 's', name: 'Siege', time: '17:00', clock: 'server', repeat: { type: 'weekly', days: [3, 5] } };
+  assert.strictEqual(s.nextAt(siege, u(14, 12, 0), west), u(15, 1, 0));
+  // NA East at the same UTC instant: Saturday 20:00 ET.
+  const eastSiege = { ...siege, time: '20:00' };
+  assert.strictEqual(s.nextAt(eastSiege, u(14, 12, 0), { region: 'na-east' }), u(15, 1, 0));
+  // Weekly reset Wednesday 07:00 UTC is independent of region.
+  const weekly = { id: 'w', name: 'Weekly reset', time: '07:00', clock: 'utc', repeat: { type: 'weekly', days: [2] } };
+  assert.strictEqual(s.nextAt(weekly, u(14, 0, 0), west), u(18, 7, 0));
 });
 
 test('due uses the server clock from the settings', () => {

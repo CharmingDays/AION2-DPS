@@ -28,12 +28,14 @@ pub const MAX_EVERY_DAYS: u32 = 365;
 /// How long a toast stays, in seconds; 0 means until dismissed.
 pub const DEFAULT_DURATION_SECS: u32 = 8;
 pub const MAX_DURATION_SECS: u32 = 600;
-/// Bumped when built-in timers are added. A file below this gets the missing
-/// built-in timers once, then never again, so deleting one sticks.
-pub const DEFAULTS_VERSION: u32 = 1;
-/// The game server clock the built-in timers start with: UTC+9 (Korea time).
-/// Unconfirmed for the NA/EU Global servers; the user can change it.
-pub const DEFAULT_SERVER_OFFSET_MINS: i32 = 9 * 60;
+/// Bumped when built-in timers are added or their hours/days change. A file
+/// below this is migrated once: missing built-ins are added and existing
+/// built-ins (matched by `default_id`) get the new schedule, keeping the
+/// user's enabled flags, lead times and custom events.
+pub const DEFAULTS_VERSION: u32 = 2;
+/// Used only when Region is Custom: a fixed UTC offset. Named regions use
+/// an IANA timezone (and follow daylight saving) instead.
+pub const DEFAULT_SERVER_OFFSET_MINS: i32 = -8 * 60;
 /// UTC-12 .. UTC+14.
 pub const MIN_OFFSET_MINS: i32 = -12 * 60;
 pub const MAX_OFFSET_MINS: i32 = 14 * 60;
@@ -51,8 +53,14 @@ pub struct Alerts {
     pub position: Position,
     pub alerts: Vec<Alert>,
     /// The game server clock as minutes east of UTC, used by events whose
-    /// `clock` is `server`.
+    /// `clock` is `server` when `region` is `Custom` (or missing on very old
+    /// files that also have no region, which now use NA West instead).
     pub server_utc_offset_mins: i32,
+    /// The player's game region, which picks the timezone for `clock: Server`
+    /// events. Missing means they have not chosen yet: countdowns use NA West
+    /// until they do, and the Alerts panel shows a warning on the Region button.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<Region>,
     /// Which set of built-in timers was last added; 0 for files from before
     /// built-in timers. See `seed_defaults`.
     pub defaults_version: u32,
@@ -68,6 +76,7 @@ impl Default for Alerts {
             position: Position::Top,
             alerts: Vec::new(),
             server_utc_offset_mins: DEFAULT_SERVER_OFFSET_MINS,
+            region: None,
             defaults_version: 0,
         }
     }
@@ -88,7 +97,7 @@ pub enum Clock {
     /// This PC's local time; every event from before clocks.
     #[default]
     Local,
-    /// The game server, at `Alerts::server_utc_offset_mins`.
+    /// The game server: a named region timezone, or `server_utc_offset_mins` when Region is Custom.
     Server,
     Utc,
 }
@@ -97,6 +106,48 @@ impl Clock {
     fn is_local(&self) -> bool {
         *self == Clock::Local
     }
+}
+
+/// The player's AION 2 Global region. Named regions use an IANA timezone so
+/// server-clock events follow daylight saving the same way NC's clock-change
+/// maintenances do. `Custom` keeps the manual UTC offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Region {
+    NaWest,
+    NaEast,
+    Europe,
+    Custom,
+}
+
+impl Region {
+    /// IANA timezone for this region, or `None` for a fixed manual offset.
+    pub fn time_zone(self) -> Option<&'static str> {
+        match self {
+            Self::NaWest => Some("America/Los_Angeles"),
+            Self::NaEast => Some("America/New_York"),
+            Self::Europe => Some("Europe/Berlin"),
+            Self::Custom => None,
+        }
+    }
+
+    /// Hours to add to the canonical NA West wall-clock times so the event
+    /// stays at the same UTC instant. NA East is UTC-5 when West is UTC-8,
+    /// so +3 all year (both zones change DST together). Europe is assumed
+    /// to share NA West's local hours, not the same UTC instant, because a
+    /// same-UTC Saturday 17:00 PT siege would land at 02:00 CET Sunday.
+    fn west_shift_hours(self) -> i32 {
+        match self {
+            Self::NaEast => 3,
+            Self::NaWest | Self::Europe | Self::Custom => 0,
+        }
+    }
+}
+
+/// Region used to materialize built-in hours when none is set: NA West,
+/// which is what the in-game clock confirmed on 2026-11-14.
+pub fn effective_region(region: Option<Region>) -> Region {
+    region.unwrap_or(Region::NaWest)
 }
 
 /// How an event repeats. Daily and weekly happen at the alert's `time`; the
@@ -312,7 +363,7 @@ pub struct Restored {
     pub alerts: Alerts,
 }
 
-fn builtin(default_id: &str, name: &str, message: &str, time: &str, repeat: Repeat, clock: Clock, enabled: bool) -> Alert {
+fn builtin(default_id: &str, name: &str, message: impl Into<String>, time: &str, repeat: Repeat, clock: Clock, enabled: bool) -> Alert {
     Alert {
         id: format!("d-{default_id}"),
         name: name.into(),
@@ -329,31 +380,124 @@ fn builtin(default_id: &str, name: &str, message: &str, time: &str, repeat: Repe
     }
 }
 
-/// The built-in Aion 2 timers, in game server time except the daily reset,
-/// which is a true 07:00 UTC. Hourly ones start off to avoid spam.
+/// Older `default_id` values rewritten to the current ones on migrate.
+const DEFAULT_ID_ALIASES: &[(&str, &str)] = &[("beritra-air-raid", "dimensional-invasion")];
+
+fn canonical_default_id(id: &str) -> &str {
+    DEFAULT_ID_ALIASES
+        .iter()
+        .find(|(old, _)| *old == id)
+        .map(|(_, new)| *new)
+        .unwrap_or(id)
+}
+
+/// "HH:MM" plus a number of hours, and how many days the clock rolled.
+fn add_hours(time: &str, hours: i32) -> (String, i32) {
+    let mut parts = time.split(':');
+    let h: i32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let m: i32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let total = h * 60 + m + hours * 60;
+    let day = total.div_euclid(24 * 60);
+    let rem = total.rem_euclid(24 * 60);
+    (format!("{:02}:{:02}", rem / 60, rem % 60), day)
+}
+
+fn shift_weekly_days(days: &[u8], delta: i32) -> Vec<u8> {
+    let mut out: Vec<u8> = days
+        .iter()
+        .map(|d| (*d as i32 + delta).rem_euclid(7) as u8)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn shift_repeat(repeat: Repeat, day_delta: i32) -> Repeat {
+    match repeat {
+        Repeat::Weekly { days } if day_delta != 0 => Repeat::Weekly { days: shift_weekly_days(&days, day_delta) },
+        other => other,
+    }
+}
+
+/// The built-in Aion 2 timers in NA West server time (America/Los_Angeles),
+/// except the daily and weekly resets, which are a true 07:00 UTC.
+/// Hours for other regions are derived by `default_alerts_for`.
 pub fn default_alerts() -> Vec<Alert> {
+    default_alerts_for(None)
+}
+
+/// Built-in timers with wall-clock hours for `region`. Unset and Europe use
+/// the NA West hours; NA East is shifted +3 hours so events stay at the same
+/// UTC instant as NA West. Custom also uses the NA West hours, plus the
+/// user's manual UTC offset at countdown time.
+pub fn default_alerts_for(region: Option<Region>) -> Vec<Alert> {
     use Clock::{Server, Utc};
     use Repeat::{Daily, Hours, Weekly};
+    let shift = effective_region(region).west_shift_hours();
+    // Hourly events fire at every :00 or :30 either way, so their anchor is
+    // left unshifted and stays 00:00 / 00:30 in every region.
+    let (kaira, _) = add_hours("00:00", shift);
+    let (executors, exec_day) = add_hours("17:30", shift);
+    let (nahma, nahma_day) = add_hours("17:00", shift);
+    let (argo, _) = add_hours("06:30", shift);
+    let (rift, _) = add_hours("01:00", shift);
+    let (siege, siege_day) = add_hours("17:00", shift);
+    let (arena_day, _) = add_hours("07:00", shift);
+    let (arena_day_end, _) = add_hours("10:00", shift);
+    let (arena_night, _) = add_hours("15:00", shift);
+    let (arena_night_end, _) = add_hours("17:00", shift);
     vec![
-        builtin("watcher-kaira", "Watcher Kaira", "Chaotic Lower Reshanta, up for 30 min", "01:00", Hours { every: 3 }, Server, true),
-        builtin("executors", "Executors (Argo, Kaira, Tamasa)", "Chaotic Lower Reshanta", "21:30", Weekly { days: vec![0, 3, 5] }, Server, true),
-        builtin("guardian-lord-nahma", "Guardian Lord Nahma", "", "21:00", Weekly { days: vec![4, 6] }, Server, true),
-        builtin("spacetime-rift", "Spacetime Rift", "Open for 10 min", "02:00", Hours { every: 3 }, Server, true),
-        builtin("beritra-air-raid", "Beritra Air Raid", "Lasts 10 min", "00:30", Hours { every: 1 }, Server, true),
+        builtin("watcher-kaira", "Watcher Kaira", "Chaotic Lower Reshanta, up for 30 min", &kaira, Hours { every: 3 }, Server, true),
+        builtin("executors", "Executors (Argo, Kaira, Tamasa)", "Chaotic Lower Reshanta", &executors, shift_repeat(Weekly { days: vec![3, 5] }, exec_day), Server, true),
+        builtin("guardian-lord-nahma", "Guardian Lord Nahma", "", &nahma, shift_repeat(Weekly { days: vec![4, 6] }, nahma_day), Server, true),
+        builtin("argo-spirit-king", "Argo, the Spirit King", "Chaotic Lower Reshanta", &argo, Hours { every: 12 }, Server, true),
+        builtin("spacetime-rift", "Spacetime Rift", "Open for 10 min", &rift, Hours { every: 3 }, Server, true),
+        builtin("dimensional-invasion", "Dimensional Invasion", "Beritra Air Raid, Accursed Sword or Incursion of the Spirits; lasts 10 min", "00:30", Hours { every: 1 }, Server, true),
         builtin("shugo-festival", "Shugo Festival", "", "00:00", Hours { every: 1 }, Server, true),
-        builtin("artifact-siege", "Artifact Siege", "", "21:00", Weekly { days: vec![0, 3, 5] }, Server, true),
-        builtin("arena-of-tactics-day", "Arena of Tactics", "Open 11:00 to 14:00 server time", "11:00", Daily { every: 1 }, Server, true),
-        builtin("arena-of-tactics-night", "Arena of Tactics", "Open 19:00 to 21:00 server time", "19:00", Daily { every: 1 }, Server, true),
+        builtin("artifact-siege", "Artifact Siege", "", &siege, shift_repeat(Weekly { days: vec![3, 5] }, siege_day), Server, true),
+        builtin("arena-of-tactics-day", "Arena of Tactics", format!("Open {arena_day} to {arena_day_end} server time"), &arena_day, Daily { every: 1 }, Server, true),
+        builtin("arena-of-tactics-night", "Arena of Tactics", format!("Open {arena_night} to {arena_night_end} server time"), &arena_night, Daily { every: 1 }, Server, true),
         builtin("daily-reset", "Daily reset", "07:00 UTC (16:00 Korea time)", "07:00", Daily { every: 1 }, Utc, true),
+        builtin("weekly-reset", "Weekly reset", "Wednesday, at the same moment as the daily reset", "07:00", Weekly { days: vec![2] }, Utc, true),
     ]
+}
+
+/// Update existing built-in timers to the current schedule for `alerts.region`,
+/// keeping each one's enabled flag, lead times, duration and id. Renames the
+/// old Beritra Air Raid id to Dimensional Invasion. Custom events are left
+/// alone. Does not add missing built-ins; `restore_defaults` does that.
+pub fn sync_builtin_schedule(alerts: &mut Alerts) {
+    for alert in &mut alerts.alerts {
+        if let Some(id) = alert.default_id.as_deref() {
+            let canon = canonical_default_id(id);
+            if canon != id {
+                alert.default_id = Some(canon.to_string());
+            }
+        }
+    }
+    for builtin in default_alerts_for(alerts.region) {
+        let Some(existing) = alerts
+            .alerts
+            .iter_mut()
+            .find(|a| a.default_id == builtin.default_id)
+        else {
+            continue;
+        };
+        existing.name = builtin.name;
+        existing.message = builtin.message;
+        existing.time = builtin.time;
+        existing.repeat = builtin.repeat;
+        existing.clock = builtin.clock;
+    }
 }
 
 /// Add the built-in timers that are missing (matched by `default_id`),
 /// leaving every other event, edited built-ins included, as it is. Returns
-/// how many were added; stops at `MAX_ALERTS`.
+/// how many were added; stops at `MAX_ALERTS`. New ones use the hours for
+/// the file's current region.
 pub fn restore_defaults(alerts: &mut Alerts) -> usize {
     let mut added = 0;
-    for mut builtin in default_alerts() {
+    for mut builtin in default_alerts_for(alerts.region) {
         if alerts.alerts.len() >= MAX_ALERTS {
             break;
         }
@@ -372,14 +516,17 @@ pub fn restore_defaults(alerts: &mut Alerts) -> usize {
     added
 }
 
-/// Once per `DEFAULTS_VERSION`: add the missing built-in timers and remember
-/// it, so ones the user deleted are not added back on the next launch.
-/// True when anything changed and the file should be saved.
+/// Once per `DEFAULTS_VERSION`: add the missing built-in timers, rewrite
+/// existing built-ins to the current schedule (keeping enabled flags and
+/// lead times), and remember it, so ones the user deleted are not added
+/// back on the next launch. True when anything changed and the file should
+/// be saved.
 pub fn seed_defaults(alerts: &mut Alerts) -> bool {
     if alerts.defaults_version >= DEFAULTS_VERSION {
         return false;
     }
     restore_defaults(alerts);
+    sync_builtin_schedule(alerts);
     alerts.defaults_version = DEFAULTS_VERSION;
     true
 }
@@ -600,11 +747,12 @@ mod tests {
         assert!(!seed_defaults(&mut a), "same defaults_version does not re-seed");
         let shugo = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("shugo-festival")).unwrap();
         assert!(!shugo.enabled, "a user's existing timer is not switched on");
-        a.alerts.retain(|x| x.default_id.as_deref() != Some("beritra-air-raid"));
+        a.alerts.retain(|x| x.default_id.as_deref() != Some("dimensional-invasion"));
         restore_defaults(&mut a);
-        let beritra = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("beritra-air-raid")).unwrap();
-        assert!(beritra.enabled, "restored missing timer uses the new enabled default");
-        assert_eq!(beritra.time, "00:30");
+        let invasion = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("dimensional-invasion")).unwrap();
+        assert!(invasion.enabled, "restored missing timer uses the new enabled default");
+        assert_eq!(invasion.time, "00:30");
+        assert_eq!(invasion.name, "Dimensional Invasion");
     }
 
     #[test]
@@ -669,6 +817,89 @@ mod tests {
         assert_eq!(a.alerts[0].default_id, None);
         let saved = serde_json::to_string(&a).unwrap();
         assert!(!saved.contains("\"clock\""), "local clock is not written: {saved}");
+    }
+
+    #[test]
+    fn v2_migrates_schedule_keeps_flags_and_renames_beritra() {
+        let mut a = Alerts::default();
+        a.defaults_version = 1;
+        a.alerts = vec![
+            alert("mine", "My boss", "20:00", None),
+        ];
+        // Old v1 built-ins: Monday siege, Beritra name, 02:00 rift.
+        let mut siege = builtin("artifact-siege", "Artifact Siege", "", "21:00", Repeat::Weekly { days: vec![0, 3, 5] }, Clock::Server, true);
+        siege.enabled = false;
+        siege.lead_mins = Some(vec![10]);
+        let mut beritra = builtin("beritra-air-raid", "Beritra Air Raid", "Lasts 10 min", "00:30", Repeat::Hours { every: 1 }, Clock::Server, true);
+        beritra.enabled = false;
+        let rift = builtin("spacetime-rift", "Spacetime Rift", "Open for 10 min", "02:00", Repeat::Hours { every: 3 }, Clock::Server, true);
+        a.alerts.extend([siege, beritra, rift]);
+        assert!(seed_defaults(&mut a));
+        assert_eq!(a.defaults_version, DEFAULTS_VERSION);
+        assert_eq!(a.alerts[0].name, "My boss", "custom event is left alone");
+        let siege = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("artifact-siege")).unwrap();
+        assert_eq!(siege.time, "17:00");
+        assert_eq!(siege.repeat, Some(Repeat::Weekly { days: vec![3, 5] }));
+        assert!(!siege.enabled, "enabled flag is kept");
+        assert_eq!(siege.lead_mins.as_deref(), Some(&[10][..]));
+        let invasion = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("dimensional-invasion")).unwrap();
+        assert_eq!(invasion.name, "Dimensional Invasion");
+        assert!(!invasion.enabled);
+        assert!(a.alerts.iter().all(|x| x.default_id.as_deref() != Some("beritra-air-raid")));
+        let rift = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("spacetime-rift")).unwrap();
+        assert_eq!(rift.time, "01:00");
+        assert!(a.alerts.iter().any(|x| x.default_id.as_deref() == Some("weekly-reset")));
+        assert!(a.alerts.iter().any(|x| x.default_id.as_deref() == Some("argo-spirit-king")));
+        let argo = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("argo-spirit-king")).unwrap();
+        assert_eq!(argo.time, "06:30");
+        assert_eq!(argo.repeat, Some(Repeat::Hours { every: 12 }));
+        assert!(!seed_defaults(&mut a));
+    }
+
+    #[test]
+    fn na_east_hours_are_three_ahead_of_na_west() {
+        let west = default_alerts_for(None);
+        let east = default_alerts_for(Some(Region::NaEast));
+        let time = |rows: &[Alert], id: &str| {
+            rows.iter().find(|a| a.default_id.as_deref() == Some(id)).unwrap().time.clone()
+        };
+        let days = |rows: &[Alert], id: &str| match rows.iter().find(|a| a.default_id.as_deref() == Some(id)).unwrap().repeat.clone() {
+            Some(Repeat::Weekly { days }) => days,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(time(&west, "artifact-siege"), "17:00");
+        assert_eq!(time(&east, "artifact-siege"), "20:00");
+        assert_eq!(days(&west, "artifact-siege"), vec![3, 5]);
+        assert_eq!(days(&east, "artifact-siege"), vec![3, 5]);
+        assert_eq!(time(&west, "spacetime-rift"), "01:00");
+        assert_eq!(time(&east, "spacetime-rift"), "04:00");
+        assert_eq!(time(&west, "watcher-kaira"), "00:00");
+        assert_eq!(time(&east, "watcher-kaira"), "03:00");
+        assert_eq!(time(&west, "executors"), "17:30");
+        assert_eq!(time(&east, "executors"), "20:30");
+        assert_eq!(time(&west, "argo-spirit-king"), "06:30");
+        assert_eq!(time(&east, "argo-spirit-king"), "09:30");
+        assert_eq!(time(&east, "shugo-festival"), "00:00", "hourly anchors are not shifted");
+        assert_eq!(time(&west, "daily-reset"), "07:00");
+        assert_eq!(time(&east, "daily-reset"), "07:00");
+        let eu = default_alerts_for(Some(Region::Europe));
+        assert_eq!(time(&eu, "artifact-siege"), "17:00", "Europe uses the same local hours as NA West");
+    }
+
+    #[test]
+    fn syncing_the_region_rewrites_builtin_hours_only() {
+        let mut a = Alerts::default();
+        restore_defaults(&mut a);
+        let shugo = a.alerts.iter_mut().find(|x| x.default_id.as_deref() == Some("shugo-festival")).unwrap();
+        shugo.enabled = false;
+        shugo.lead_mins = Some(vec![1]);
+        a.region = Some(Region::NaEast);
+        sync_builtin_schedule(&mut a);
+        let siege = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("artifact-siege")).unwrap();
+        assert_eq!(siege.time, "20:00");
+        let shugo = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("shugo-festival")).unwrap();
+        assert!(!shugo.enabled);
+        assert_eq!(shugo.lead_mins.as_deref(), Some(&[1][..]));
     }
 
     #[test]

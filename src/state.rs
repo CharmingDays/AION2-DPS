@@ -252,6 +252,9 @@ impl AppState {
         // A page that does not know the field must not make the built-in
         // timers come back on the next launch.
         alerts.defaults_version = alerts.defaults_version.max(current.defaults_version);
+        if alerts.region != current.region {
+            alerts::sync_builtin_schedule(&mut alerts);
+        }
         let alerts = alerts::validate(alerts)?;
         if let Some(path) = &self.alerts_path {
             alerts::save(path, &alerts).map_err(|err| {

@@ -13,6 +13,7 @@
   const REPEAT_TYPES = [['none', 'Does not repeat'], ['minutes', 'Minutes'], ['hours', 'Hours'], ['daily', 'Daily'], ['weekly', 'Weekly'], ['hours_minutes', 'Hours + minutes']];
   const ICON_EDIT = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 3.2l2.3 2.3-7 7H3.5v-2.3z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
   const ICON_TRASH = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/></svg>';
+  const ICON_GLOBE = '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.5"/><ellipse cx="8" cy="8" rx="2.2" ry="5.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M2.5 8h11M3.4 5h9.2M3.4 11h9.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
 
   const CLOCKS = [['local', 'This PC (local)'], ['server', 'Game server'], ['utc', 'UTC']];
   /** UTC-12 .. UTC+14 by the hour, as minutes. */
@@ -42,7 +43,16 @@
     panel.className = 'alerts-panel';
     panel.hidden = true;
     panel.innerHTML = `
-      <div class="ap-head"><h2>Notifications</h2><button type="button" class="t-close" data-close title="Close"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></div>
+      <div class="ap-head">
+        <h2>Notifications</h2>
+        <div class="ap-region-wrap">
+          <button type="button" class="ap-region" data-region-btn title="Pick your game region">${ICON_GLOBE}<span data-region-label>Region</span></button>
+          <div class="ap-region-menu" data-region-menu hidden>
+            ${sched.REGIONS.map((r) => `<button type="button" data-pick-region="${r.id}">${r.label}</button>`).join('')}
+          </div>
+        </div>
+        <button type="button" class="t-close" data-close title="Close"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
+      </div>
       <div class="ap-body">
         <div class="ap-row"><span class="ap-label"><span>Event alerts</span><span>Warn me before events start</span></span><button type="button" class="switch" data-key="enabled" aria-label="Event alerts"></button></div>
         <div class="ap-row"><span class="ap-label"><span>Lead time</span><span>How early to show the banner</span></span><div class="ap-chips" data-leads>${LEADS.map((m) => `<button type="button" data-lead="${m}">${m} min</button>`).join('')}</div></div>
@@ -56,7 +66,7 @@
             <button type="button" class="btn small primary" data-new>+ Add event</button>
           </div>
         </div>
-        <div class="ap-row"><span class="ap-label"><span>Server clock</span><span>For (server) events. Unconfirmed for Global servers: check an in-game time</span></span><select class="ap-select" data-server>${OFFSETS.map((m) => `<option value="${m}">${sched.offsetLabel(m)}</option>`).join('')}</select></div>
+        <div class="ap-row" data-server-row><span class="ap-label"><span>Server clock</span><span data-server-hint>Used when Region is Custom. Pick a named region to follow daylight saving.</span></span><select class="ap-select" data-server>${OFFSETS.map((m) => `<option value="${m}">${sched.offsetLabel(m)}</option>`).join('')}</select></div>
         <div class="ap-foot"><span class="ap-note" data-note></span><button type="button" class="btn small primary" data-preview>Preview</button></div>
       </div>`;
     document.body.append(panel);
@@ -70,10 +80,18 @@
       panel.querySelectorAll('.switch').forEach((s) => s.classList.toggle('on', Boolean(settings[s.dataset.key])));
       panel.querySelectorAll('[data-lead]').forEach((b) => b.classList.toggle('on', settings.lead_mins.includes(Number(b.dataset.lead))));
       panel.querySelectorAll('[data-pos]').forEach((b) => b.classList.toggle('on', b.dataset.pos === settings.position));
+      const regionId = settings.region || '';
+      const regionBtn = q('[data-region-btn]');
+      const unset = !regionId;
+      regionBtn.classList.toggle('unset', unset);
+      q('[data-region-label]').textContent = unset ? 'Region' : (sched.regionLabel(regionId) || 'Region');
+      regionBtn.title = unset ? 'No region set. Countdowns use NA West until you pick one.' : 'Change your game region';
+      q('[data-region-menu]').querySelectorAll('[data-pick-region]').forEach((b) => b.classList.toggle('on', b.dataset.pickRegion === regionId));
       const server = q('[data-server]');
       const off = Number(settings.server_utc_offset_mins ?? sched.DEFAULT_SERVER_OFFSET_MINS);
       if (![...server.options].some((o) => Number(o.value) === off)) server.add(new Option(sched.offsetLabel(off), String(off)));
       server.value = String(off);
+      q('[data-server-row]').hidden = regionId !== 'custom';
       const list = settings.alerts;
       const now = Date.now();
       q('[data-events]').innerHTML = list.length
@@ -91,7 +109,7 @@
       change(next);
       try {
         settings = await bridge.setAlerts(next);
-        note('');
+        note('Saved', true);
         notifier.reload();
       } catch (err) {
         note(`Could not save: ${(err && err.message) || err}`);
@@ -138,7 +156,31 @@
     q('[data-preview]').addEventListener('click', () => notifier.preview());
     q('[data-server]').addEventListener('change', (event) => {
       const m = Number(event.target.value);
-      if (settings) save((s) => { s.server_utc_offset_mins = m; });
+      if (settings) save((s) => { s.region = 'custom'; s.server_utc_offset_mins = m; });
+    });
+    const regionMenu = q('[data-region-menu]');
+    const closeRegionMenu = () => { regionMenu.hidden = true; };
+    q('[data-region-btn]').addEventListener('click', (event) => {
+      event.stopPropagation();
+      regionMenu.hidden = !regionMenu.hidden;
+    });
+    regionMenu.addEventListener('click', (event) => {
+      const pick = event.target.closest('[data-pick-region]');
+      if (!pick || !settings) return;
+      const id = pick.dataset.pickRegion;
+      closeRegionMenu();
+      if (id === settings.region) return;
+      save((s) => {
+        s.region = id;
+        if (id === 'custom') {
+          const zone = sched.DEFAULT_ZONE;
+          s.server_utc_offset_mins = sched.zoneOffsetMins(Date.now(), zone);
+        }
+      });
+    });
+    document.addEventListener('click', (event) => {
+      if (regionMenu.hidden) return;
+      if (!event.target.closest('.ap-region-wrap')) closeRegionMenu();
     });
     q('[data-restore]').addEventListener('click', async () => {
       if (!settings || !confirm(RESTORE_CONFIRM)) return;
