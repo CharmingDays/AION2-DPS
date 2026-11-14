@@ -220,8 +220,8 @@ impl AppState {
     /// Load event alerts from `path` and save changes back to it.
     pub fn with_alerts(mut self, path: Option<PathBuf>) -> Self {
         if let Some(path) = &path {
-            let mut loaded = alerts::load(path);
-            if alerts::seed_defaults(&mut loaded) {
+            let (mut loaded, changed) = alerts::load_and_prepare(path);
+            if changed {
                 match alerts::validate(loaded.clone()) {
                     Ok(valid) => {
                         if let Err(err) = alerts::save(path, &valid) {
@@ -255,6 +255,9 @@ impl AppState {
         if alerts.region != current.region {
             alerts::sync_builtin_schedule(&mut alerts);
         }
+        // Repair duplicate or obsolete built-in ids so a stale in-memory list
+        // cannot block saving.
+        alerts::prepare_alerts(&mut alerts);
         let alerts = alerts::validate(alerts)?;
         if let Some(path) = &self.alerts_path {
             alerts::save(path, &alerts).map_err(|err| {

@@ -391,6 +391,68 @@ fn canonical_default_id(id: &str) -> &str {
         .unwrap_or(id)
 }
 
+fn alert_default_id(alert: &Alert) -> Option<&str> {
+    alert.default_id.as_deref().map(canonical_default_id)
+}
+
+fn has_builtin(alerts: &Alerts, id: &str) -> bool {
+    let want = canonical_default_id(id);
+    alerts.alerts.iter().any(|a| alert_default_id(a) == Some(want))
+}
+
+/// Rename obsolete built-in ids (e.g. Beritra Air Raid) to the current ones.
+/// Returns how many were renamed.
+fn canonicalize_default_ids(alerts: &mut Alerts) -> usize {
+    let mut n = 0;
+    for alert in &mut alerts.alerts {
+        if let Some(id) = alert.default_id.as_deref() {
+            let canon = canonical_default_id(id);
+            if canon != id {
+                alert.default_id = Some(canon.to_string());
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Drop later alerts that share a `default_id` with an earlier one, keeping
+/// the first (the user's copy, including its enabled flag and lead times).
+/// Returns how many were removed.
+fn dedupe_default_ids(alerts: &mut Alerts) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    let mut dropped = 0;
+    alerts.alerts.retain(|alert| {
+        let Some(id) = alert_default_id(alert) else { return true };
+        if seen.insert(id.to_string()) {
+            true
+        } else {
+            dropped += 1;
+            false
+        }
+    });
+    dropped
+}
+
+/// Idempotent repair: map old ids, drop duplicate built-ins, and migrate a
+/// file that is behind `DEFAULTS_VERSION`. True when anything changed.
+pub fn prepare_alerts(alerts: &mut Alerts) -> bool {
+    let mut changed = false;
+    if canonicalize_default_ids(alerts) > 0 {
+        changed = true;
+    }
+    if dedupe_default_ids(alerts) > 0 {
+        changed = true;
+    }
+    if alerts.defaults_version < DEFAULTS_VERSION {
+        restore_defaults(alerts);
+        sync_builtin_schedule(alerts);
+        alerts.defaults_version = DEFAULTS_VERSION;
+        changed = true;
+    }
+    changed
+}
+
 /// "HH:MM" plus a number of hours, and how many days the clock rolled.
 fn add_hours(time: &str, hours: i32) -> (String, i32) {
     let mut parts = time.split(':');
@@ -463,23 +525,16 @@ pub fn default_alerts_for(region: Option<Region>) -> Vec<Alert> {
 }
 
 /// Update existing built-in timers to the current schedule for `alerts.region`,
-/// keeping each one's enabled flag, lead times, duration and id. Renames the
-/// old Beritra Air Raid id to Dimensional Invasion. Custom events are left
-/// alone. Does not add missing built-ins; `restore_defaults` does that.
+/// keeping each one's enabled flag, lead times, duration and id. Custom events
+/// are left alone. Does not add missing built-ins; `restore_defaults` does that.
+/// Ids should already be canonical; this also remaps aliases to be safe.
 pub fn sync_builtin_schedule(alerts: &mut Alerts) {
-    for alert in &mut alerts.alerts {
-        if let Some(id) = alert.default_id.as_deref() {
-            let canon = canonical_default_id(id);
-            if canon != id {
-                alert.default_id = Some(canon.to_string());
-            }
-        }
-    }
+    canonicalize_default_ids(alerts);
     for builtin in default_alerts_for(alerts.region) {
         let Some(existing) = alerts
             .alerts
             .iter_mut()
-            .find(|a| a.default_id == builtin.default_id)
+            .find(|a| alert_default_id(a) == builtin.default_id.as_deref())
         else {
             continue;
         };
@@ -491,17 +546,18 @@ pub fn sync_builtin_schedule(alerts: &mut Alerts) {
     }
 }
 
-/// Add the built-in timers that are missing (matched by `default_id`),
-/// leaving every other event, edited built-ins included, as it is. Returns
-/// how many were added; stops at `MAX_ALERTS`. New ones use the hours for
-/// the file's current region.
+/// Add the built-in timers that are missing (matched by `default_id`, including
+/// obsolete aliases), leaving every other event, edited built-ins included,
+/// as it is. Returns how many were added; stops at `MAX_ALERTS`. New ones use
+/// the hours for the file's current region.
 pub fn restore_defaults(alerts: &mut Alerts) -> usize {
+    canonicalize_default_ids(alerts);
     let mut added = 0;
     for mut builtin in default_alerts_for(alerts.region) {
         if alerts.alerts.len() >= MAX_ALERTS {
             break;
         }
-        if alerts.alerts.iter().any(|a| a.default_id == builtin.default_id) {
+        if has_builtin(alerts, builtin.default_id.as_deref().unwrap_or("")) {
             continue;
         }
         let base = builtin.id.clone();
@@ -516,28 +572,31 @@ pub fn restore_defaults(alerts: &mut Alerts) -> usize {
     added
 }
 
-/// Once per `DEFAULTS_VERSION`: add the missing built-in timers, rewrite
-/// existing built-ins to the current schedule (keeping enabled flags and
-/// lead times), and remember it, so ones the user deleted are not added
-/// back on the next launch. True when anything changed and the file should
-/// be saved.
+/// Repair and, when the file is behind `DEFAULTS_VERSION`, migrate built-in
+/// timers. Idempotent: safe to call again, and it will not re-add timers the
+/// user deleted once the version has been bumped. True when anything changed
+/// and the file should be saved.
 pub fn seed_defaults(alerts: &mut Alerts) -> bool {
-    if alerts.defaults_version >= DEFAULTS_VERSION {
-        return false;
-    }
-    restore_defaults(alerts);
-    sync_builtin_schedule(alerts);
-    alerts.defaults_version = DEFAULTS_VERSION;
-    true
+    prepare_alerts(alerts)
 }
 
-/// The saved alerts, or the defaults when the file is missing or damaged.
+/// The saved alerts, or the defaults when the file is missing or unreadable.
+/// A file that parses but would fail validation (for example duplicate
+/// built-in ids left by an older migrate) is repaired in place instead of
+/// being thrown away.
 pub fn load(path: &Path) -> Alerts {
-    std::fs::read(path)
+    load_and_prepare(path).0
+}
+
+/// Like `load`, plus whether the alerts were repaired or migrated and should
+/// be written back.
+pub fn load_and_prepare(path: &Path) -> (Alerts, bool) {
+    let mut alerts = std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Alerts>(&bytes).ok())
-        .and_then(|alerts| validate(alerts).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let changed = prepare_alerts(&mut alerts);
+    (validate(alerts.clone()).unwrap_or(alerts), changed)
 }
 
 pub fn save(path: &Path, alerts: &Alerts) -> std::io::Result<()> {
@@ -842,6 +901,8 @@ mod tests {
         assert_eq!(siege.repeat, Some(Repeat::Weekly { days: vec![3, 5] }));
         assert!(!siege.enabled, "enabled flag is kept");
         assert_eq!(siege.lead_mins.as_deref(), Some(&[10][..]));
+        let invasion_count = a.alerts.iter().filter(|x| x.default_id.as_deref() == Some("dimensional-invasion")).count();
+        assert_eq!(invasion_count, 1, "Beritra is renamed, not added beside a new invasion timer");
         let invasion = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("dimensional-invasion")).unwrap();
         assert_eq!(invasion.name, "Dimensional Invasion");
         assert!(!invasion.enabled);
@@ -854,6 +915,25 @@ mod tests {
         assert_eq!(argo.time, "06:30");
         assert_eq!(argo.repeat, Some(Repeat::Hours { every: 12 }));
         assert!(!seed_defaults(&mut a));
+    }
+
+    #[test]
+    fn prepare_dedupes_a_broken_v2_file_and_keeps_the_user_copy() {
+        let mut a = Alerts::default();
+        a.defaults_version = DEFAULTS_VERSION;
+        let mut beritra = builtin("beritra-air-raid", "Beritra Air Raid", "Lasts 10 min", "00:30", Repeat::Hours { every: 1 }, Clock::Server, true);
+        beritra.enabled = false;
+        beritra.lead_mins = Some(vec![1]);
+        let extra = builtin("dimensional-invasion", "Dimensional Invasion", "new copy", "00:30", Repeat::Hours { every: 1 }, Clock::Server, true);
+        a.alerts = vec![beritra, extra];
+        assert!(prepare_alerts(&mut a));
+        assert_eq!(a.alerts.len(), 1);
+        assert_eq!(a.alerts[0].default_id.as_deref(), Some("dimensional-invasion"));
+        assert!(!a.alerts[0].enabled, "the user's earlier copy is kept");
+        assert_eq!(a.alerts[0].lead_mins.as_deref(), Some(&[1][..]));
+        assert_eq!(a.defaults_version, DEFAULTS_VERSION);
+        assert!(!prepare_alerts(&mut a), "repair is idempotent");
+        assert!(validate(a).is_ok());
     }
 
     #[test]
