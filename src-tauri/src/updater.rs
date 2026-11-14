@@ -2,9 +2,15 @@
 //! release, and on "Update now" download its NSIS installer, check it against
 //! the release's SHA256SUMS.txt, start it and quit so no file is locked.
 //!
+//! When Config allows it (on by default), a background thread asks the same
+//! GitHub latest-release URL shortly after start and then every hour. A newer
+//! version is announced once (`AVAILABLE`), the meter pill can turn on, and
+//! `Live::update_available` holds the version for the UI. Failures stay in
+//! app.log. Nothing is downloaded or installed until the user clicks.
+//!
 //! The only traffic is to GitHub (api.github.com and the release download
 //! links), through Windows' own curl.exe like the pet icons. Nothing goes to
-//! the game. Nothing is downloaded or installed until the user clicks.
+//! the game.
 //!
 //! Not tauri-plugin-updater: that needs a signing key pair, a signed
 //! `latest.json` and a changed release process. Here the SHA-256 in
@@ -15,10 +21,11 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aion2dps::AppState;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
@@ -28,9 +35,15 @@ const LATEST: &str = "https://api.github.com/repos/CharmingDays/aion-tallymark/r
 const SUMS: &str = "SHA256SUMS.txt";
 /// A check is reused for this long unless the button asks again.
 const CACHE: Duration = Duration::from_secs(30 * 60);
+/// First automatic check, after the windows are up.
+const START_DELAY: Duration = Duration::from_secs(10);
+/// How often automatic checks run after that.
+const INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Biggest installer we accept (v0.3.0's is about 4 MB).
 const MAX_SETUP: u64 = 200 * 1024 * 1024;
 pub const PROGRESS: &str = "update-progress";
+/// Fired at most once per new version when an automatic check finds an update.
+pub const AVAILABLE: &str = "update-available";
 
 /// What the page shows after a check.
 #[derive(Debug, Clone)]
@@ -219,6 +232,65 @@ pub fn check(app: &AppHandle, fresh: bool) -> Result<Check, String> {
     let check = release.check.clone();
     *updater.last.lock().unwrap() = Some((Instant::now(), release));
     Ok(check)
+}
+
+/// After a short delay, then every hour: ask GitHub if Config allows it.
+/// Failures stay in app.log. A newer version is announced once ([`AVAILABLE`]).
+pub fn start_background(app: AppHandle) {
+    thread::spawn(move || {
+        thread::sleep(START_DELAY);
+        loop {
+            poll(&app, true);
+            thread::sleep(INTERVAL);
+        }
+    });
+}
+
+/// A one-shot check (Config just turned the automatic checks on).
+pub fn kick(app: &AppHandle) {
+    let app = app.clone();
+    thread::spawn(move || poll(&app, true));
+}
+
+fn poll(app: &AppHandle, notify: bool) {
+    if !app.state::<Arc<AppState>>().check_updates_automatically() {
+        return;
+    }
+    match check(app, false) {
+        Ok(c) => remember(app, &c, notify),
+        Err(err) => tracing::warn!(target: "update", "automatic check failed: {err}"),
+    }
+}
+
+/// Keep the live "update available" state, and optionally announce a new version once.
+pub fn remember(app: &AppHandle, check: &Check, notify: bool) {
+    let state = app.state::<Arc<AppState>>();
+    if check.newer {
+        state.set_update_found(Some(check.latest.clone()));
+    } else {
+        state.set_update_found(None);
+        return;
+    }
+    if !notify || state.update_is_skipped(&check.latest) {
+        return;
+    }
+    if state.update_last_notified().as_deref() == Some(check.latest.as_str()) {
+        return;
+    }
+    if let Err(err) = app.emit(AVAILABLE, check_json(check, state.update_is_skipped(&check.latest))) {
+        tracing::warn!(target: "update", "could not emit {AVAILABLE}: {err}");
+        return;
+    }
+    tracing::info!(target: "update", latest = %check.latest, "update available");
+    state.set_update_last_notified(Some(check.latest.clone()));
+}
+
+/// The check as the page sees it, including whether this version was skipped.
+pub fn check_json(check: &Check, skipped: bool) -> Value {
+    let mut value = check.json();
+    value["skipped"] = json!(skipped);
+    value["available"] = json!(check.newer && !skipped);
+    value
 }
 
 fn emit(app: &AppHandle, stage: &'static str, done: u64, total: u64) {

@@ -1,31 +1,22 @@
-// "Check for updates" (the version pill in the detailed meter) and the optional
-// quiet check when the meter opens.
+// "Check for updates" (the version pill in the detailed meter) and the
+// automatic background check (Config > General, on by default).
 // The app asks GitHub for the latest release of aion-tallymark; on "Update now"
 // it downloads the installer, checks its SHA-256 against the release's
 // SHA256SUMS.txt, starts it and closes so the files can be replaced. Nothing is
 // downloaded or installed unless the user clicks "Update now". App only.
+//
+// Automatic checks only mark the pill, keep live.update_available, and fire
+// `update-available` once per new version. There is no overlay indicator yet.
 (function () {
-  const STARTUP_KEY = 'aion2dps.update.startup';
   const SKIP_KEY = 'aion2dps.update.skip';
   const tauri = window.__TAURI__;
   const inApp = Boolean(tauri && tauri.core);
   const invoke = (cmd, args) => tauri.core.invoke(cmd, args);
 
-  const onStartup = () => localStorage.getItem(STARTUP_KEY) === '1';
-  const setOnStartup = (on) => localStorage.setItem(STARTUP_KEY, on ? '1' : '0');
-  const skipped = () => localStorage.getItem(SKIP_KEY) || '';
   const errText = (err) => String((err && err.message) || err || 'Something went wrong.').trim();
 
   /** The latest release; `fresh` asks GitHub even if it was asked lately. */
   const check = (fresh) => invoke('check_update', { fresh: Boolean(fresh) });
-
-  /** Quiet check at start (Config toggle). Calls `found(check)` for a newer, not skipped version. */
-  function startupCheck(found) {
-    if (!inApp || !onStartup()) return;
-    check(false).then((c) => {
-      if (c && c.newer && c.latest !== skipped()) found(c);
-    }).catch(() => { /* quiet: errors are in app.log */ });
-  }
 
   const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
 
@@ -33,9 +24,37 @@
   const plainNotes = (text) => String(text || '').replace(/\r/g, '')
     .replace(/^#{1,6}\s*/gm, '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1').trim();
 
+  let pill = null;
+  let skipped = '';
+
+  function mark(latest) {
+    if (!pill) return;
+    const on = Boolean(latest);
+    pill.classList.toggle('on', on);
+    pill.title = on ? `Version ${latest} is available - click to see what's new` : '';
+  }
+
+  /** Apply live.update_available (string or null) from a meter snapshot. */
+  function sync(live) {
+    if (!live) return;
+    const latest = live.update_available || '';
+    if (latest) skipped = '';
+    mark(latest || '');
+  }
+
+  function migrateSkip() {
+    const old = localStorage.getItem(SKIP_KEY) || '';
+    if (!old || !inApp) return Promise.resolve();
+    return invoke('set_update_skipped', { version: old }).then(() => {
+      skipped = old;
+      localStorage.removeItem(SKIP_KEY);
+    }).catch(() => {});
+  }
+
   /** The meter's button and dialog. */
   function attach(button, versionLabel) {
     if (!button) return;
+    pill = button;
     if (!inApp) { button.hidden = true; return; }
     invoke('app_version').then((v) => { if (versionLabel) versionLabel.textContent = `v${v}`; }).catch(() => {});
 
@@ -90,7 +109,8 @@
         view({ msg: errText(err), again: true, bad: true });
         return;
       }
-      button.classList.toggle('on', Boolean(current.newer) && current.latest !== skipped());
+      const on = Boolean(current.available);
+      mark(on ? current.latest : '');
       if (!current.newer) {
         view({ msg: `You're up to date (v${current.current} is the latest).`, link: Boolean(current.url) });
         return;
@@ -103,7 +123,7 @@
           : `Version ${current.latest} is available, but it has no Windows installer attached. Get it from the release page.`,
         notes: plainNotes(current.notes) || 'No release notes.',
         update: canInstall,
-        skip: current.latest !== skipped(),
+        skip: !current.skipped,
         link: Boolean(current.url),
         later: 'Later',
       });
@@ -129,6 +149,9 @@
           text = `Downloading\u2026 ${mb(p.done)}${p.total ? ` of ${mb(p.total)} (${pct}%)` : ''}`;
         }
         step.textContent = text;
+      }).catch(() => {});
+      tauri.event.listen('update-available', ({ payload: c }) => {
+        if (c && (c.available || (c.newer && !c.skipped))) mark(c.latest);
       }).catch(() => {});
     }
 
@@ -158,8 +181,10 @@
     q('again').addEventListener('click', () => run(true));
     q('update').addEventListener('click', update);
     q('skip').addEventListener('click', () => {
-      if (current) localStorage.setItem(SKIP_KEY, current.latest);
-      button.classList.remove('on');
+      if (!current) { close(); return; }
+      skipped = current.latest;
+      invoke('set_update_skipped', { version: current.latest }).catch(() => {});
+      mark('');
       close();
     });
     q('link').addEventListener('click', (event) => {
@@ -169,11 +194,8 @@
     back.addEventListener('click', (event) => { if (event.target === back) close(); });
     document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !back.hidden) close(); });
 
-    startupCheck((c) => {
-      button.classList.add('on');
-      button.title = `Version ${c.latest} is available - click to see what's new`;
-    });
+    migrateSkip();
   }
 
-  window.updates = { attach, startupCheck, onStartup, setOnStartup, STARTUP_KEY };
+  window.updates = { attach, sync };
 })();

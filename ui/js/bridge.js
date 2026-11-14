@@ -106,6 +106,7 @@
       : post('/api/settings', { minimize_to_tray: on })),
     setStartWithWindows: (on) => tauri.core.invoke('set_start_with_windows', { on }),
     setPopUpOnBoss: (on) => tauri.core.invoke('set_pop_up_on_boss', { on }),
+    setCheckUpdatesAutomatically: (on) => tauri.core.invoke('set_check_updates_automatically', { on }),
     setOverlayClickThrough: (on) => (inApp
       ? tauri.core.invoke('set_overlay_click_through', { on })
       : post('/api/settings', { overlay_click_through: on })),

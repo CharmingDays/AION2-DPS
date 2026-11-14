@@ -425,6 +425,8 @@ pub struct SettingsView {
     /// Desktop shell: overlay body click-through (top bar stays interactive).
     /// Combat ignores this; AppState fills it for the live view.
     pub overlay_click_through: bool,
+    /// AppState-owned: check GitHub shortly after start and every hour.
+    pub check_updates_automatically: bool,
     /// AppState-owned passive cube alert preference.
     pub hidden_cube_alerts: bool,
     /// AppState-owned: pet soul progress toasts, and seconds they stay.
@@ -626,6 +628,7 @@ impl Combat {
             start_with_windows: false,
             pop_up_on_boss: true,
             overlay_click_through: true,
+            check_updates_automatically: true,
             hidden_cube_alerts: true,
             pet_toasts: true,
             pet_toast_secs: crate::pets::DEFAULT_TOAST_SECS,

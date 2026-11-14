@@ -200,6 +200,19 @@ fn set_overlay_click_through(state: State<'_, Arc<AppState>>, on: bool) {
     state.set_overlay_click_through(on);
 }
 
+#[tauri::command]
+fn set_check_updates_automatically(app: AppHandle, state: State<'_, Arc<AppState>>, on: bool) {
+    state.set_check_updates_automatically(on);
+    if on {
+        updater::kick(&app);
+    }
+}
+
+#[tauri::command]
+fn set_update_skipped(state: State<'_, Arc<AppState>>, version: String) {
+    state.set_update_skipped(version);
+}
+
 /// Either value may be left out.
 #[tauri::command]
 fn set_pet_toasts(state: State<'_, Arc<AppState>>, on: Option<bool>, secs: Option<u64>) -> Result<(), String> {
@@ -683,9 +696,14 @@ fn quit_app(app: AppHandle) {
 /// "Check for updates": the latest GitHub release against this build.
 #[tauri::command]
 async fn check_update(app: AppHandle, fresh: bool) -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || updater::check(&app, fresh).map(|c| c.json()))
-        .await
-        .map_err(|err| err.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let check = updater::check(&app, fresh)?;
+        updater::remember(&app, &check, false);
+        let skipped = app.state::<Arc<AppState>>().update_is_skipped(&check.latest);
+        Ok(updater::check_json(&check, skipped))
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 /// "Update now": download and verify the installer from the last check, start it, quit.
@@ -1199,6 +1217,8 @@ fn main() {
             set_minimize_to_tray,
             set_start_with_windows,
             set_pop_up_on_boss,
+            set_check_updates_automatically,
+            set_update_skipped,
             set_overlay_click_through,
             set_hidden_cube_alerts,
             set_pet_toasts,
@@ -1289,6 +1309,7 @@ fn main() {
                 tracing::warn!("cube alert window is unavailable: {err}");
             }
             tray_watch::start_watcher(handle.clone(), state.clone());
+            updater::start_background(handle.clone());
             push_snapshots(handle, state, windowless);
             Ok(())
         })

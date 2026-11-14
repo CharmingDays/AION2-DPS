@@ -70,6 +70,9 @@ pub struct Live {
     pub pets_version: u64,
     /// Config > Toasts & pop-ups: the look and place of each kind of pop-up.
     pub toast_styles: crate::toast_style::ToastStyles,
+    /// Newer GitHub release version, if one is known and not skipped.
+    /// Overlay and meter can show this; nothing is installed until the user asks.
+    pub update_available: Option<String>,
 }
 
 /// The opt-in local debug logs (pets, position, cubes). Each one only writes
@@ -120,6 +123,14 @@ pub struct AppState {
     /// When on, the overlay body lets clicks through to the game; the top bar
     /// and resize edges stay interactive. Desktop shell only.
     overlay_click_through: AtomicBool,
+    /// Config: check GitHub shortly after start and every hour. Default on.
+    check_updates_automatically: AtomicBool,
+    /// Last version we emitted `update-available` for (saved; no repeat notify).
+    update_last_notified: Mutex<Option<String>>,
+    /// Version the user skipped in the update dialog (saved).
+    update_skipped: Mutex<Option<String>>,
+    /// Latest newer version a check found this session (not saved).
+    update_found: Mutex<Option<String>>,
     /// Where monster names are saved. `None` keeps them in memory only.
     names_path: Option<PathBuf>,
     /// One save at a time, so the file always holds the latest table.
@@ -208,6 +219,10 @@ impl AppState {
             start_with_windows: AtomicBool::new(stored.start_with_windows),
             pop_up_on_boss: AtomicBool::new(stored.pop_up_on_boss),
             overlay_click_through: AtomicBool::new(stored.overlay_click_through),
+            check_updates_automatically: AtomicBool::new(stored.check_updates_automatically),
+            update_last_notified: Mutex::new(stored.update_last_notified.clone()),
+            update_skipped: Mutex::new(stored.update_skipped.clone()),
+            update_found: Mutex::new(None),
             names_path,
             names_io: Mutex::new(()),
             sessions_dir,
@@ -366,6 +381,7 @@ impl AppState {
         settings.debug_position = self.debug_position.load(Ordering::Relaxed);
         settings.debug_cubes = self.debug_cubes.load(Ordering::Relaxed);
         settings.debug_env = self.debug_env;
+        settings.check_updates_automatically = self.check_updates_automatically();
         Live {
             cube_alerts: self.with_cubes(|cubes| {
                 if self.hidden_cube_alerts() {
@@ -386,6 +402,7 @@ impl AppState {
             history,
             pets_version: self.with_pets_state(|pets| pets.version()),
             toast_styles: self.toast_styles(),
+            update_available: self.update_available(),
             capture: self
                 .capture
                 .lock()
@@ -506,6 +523,56 @@ impl AppState {
         self.store_settings();
     }
 
+    pub fn check_updates_automatically(&self) -> bool {
+        self.check_updates_automatically.load(Ordering::Relaxed)
+    }
+
+    /// Persist the automatic GitHub check. Default is on.
+    pub fn set_check_updates_automatically(&self, on: bool) {
+        self.check_updates_automatically.store(on, Ordering::Relaxed);
+        self.store_settings();
+    }
+
+    fn lock_opt(slot: &Mutex<Option<String>>) -> std::sync::MutexGuard<'_, Option<String>> {
+        slot.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn update_last_notified(&self) -> Option<String> {
+        Self::lock_opt(&self.update_last_notified).clone()
+    }
+
+    pub fn set_update_last_notified(&self, version: Option<String>) {
+        *Self::lock_opt(&self.update_last_notified) = version;
+        self.store_settings();
+    }
+
+    pub fn update_is_skipped(&self, version: &str) -> bool {
+        Self::lock_opt(&self.update_skipped).as_deref() == Some(version)
+    }
+
+    /// Remember a skipped version so the pill stays off and it is not announced again.
+    pub fn set_update_skipped(&self, version: String) {
+        let version = version.trim().trim_start_matches(['v', 'V']).to_string();
+        if version.is_empty() {
+            return;
+        }
+        *Self::lock_opt(&self.update_skipped) = Some(version.clone());
+        *Self::lock_opt(&self.update_last_notified) = Some(version);
+        self.store_settings();
+    }
+
+    pub fn set_update_found(&self, version: Option<String>) {
+        *Self::lock_opt(&self.update_found) = version;
+    }
+
+    /// Newer version a check found, if it was not skipped.
+    pub fn update_available(&self) -> Option<String> {
+        match Self::lock_opt(&self.update_found).clone() {
+            Some(version) if !self.update_is_skipped(&version) => Some(version),
+            _ => None,
+        }
+    }
+
     pub fn with_cubes<T>(&self, f: impl FnOnce(&mut crate::hidden_cubes::Detector) -> T) -> T {
         f(&mut self.cubes.lock().unwrap_or_else(|e| e.into_inner()))
     }
@@ -609,6 +676,9 @@ impl AppState {
             start_with_windows: self.start_with_windows(),
             pop_up_on_boss: self.pop_up_on_boss(),
             overlay_click_through: self.overlay_click_through(),
+            check_updates_automatically: self.check_updates_automatically(),
+            update_last_notified: self.update_last_notified(),
+            update_skipped: Self::lock_opt(&self.update_skipped).clone(),
             hidden_cube_alerts: self.hidden_cube_alerts(),
             pet_toasts: self.pet_toasts(),
             pet_toast_secs: self.pet_toast_secs(),
@@ -647,6 +717,12 @@ struct StoredSettings {
     pop_up_on_boss: bool,
     /// Default on: overlay body is click-through.
     overlay_click_through: bool,
+    /// Default on: check GitHub shortly after start and every hour.
+    check_updates_automatically: bool,
+    /// Last version announced as available; do not notify about it again.
+    update_last_notified: Option<String>,
+    /// Version the user chose to skip in the update dialog.
+    update_skipped: Option<String>,
     hidden_cube_alerts: bool,
     /// Default on, 60 s after the last soul.
     pet_toasts: bool,
@@ -675,6 +751,9 @@ impl Default for StoredSettings {
             start_with_windows: false,
             pop_up_on_boss: true,
             overlay_click_through: true,
+            check_updates_automatically: true,
+            update_last_notified: None,
+            update_skipped: None,
             hidden_cube_alerts: true,
             pet_toasts: true,
             pet_toast_secs: crate::pets::DEFAULT_TOAST_SECS,
@@ -698,6 +777,9 @@ impl From<SettingsView> for StoredSettings {
             start_with_windows: view.start_with_windows,
             pop_up_on_boss: view.pop_up_on_boss,
             overlay_click_through: view.overlay_click_through,
+            check_updates_automatically: view.check_updates_automatically,
+            update_last_notified: None,
+            update_skipped: None,
             hidden_cube_alerts: view.hidden_cube_alerts,
             pet_toasts: view.pet_toasts,
             pet_toast_secs: view.pet_toast_secs,
@@ -790,6 +872,9 @@ mod tests {
         assert!(!stored.start_with_windows);
         assert!(stored.pop_up_on_boss);
         assert!(stored.overlay_click_through);
+        assert!(stored.check_updates_automatically);
+        assert_eq!(stored.update_last_notified, None);
+        assert_eq!(stored.update_skipped, None);
     }
 
     #[test]
@@ -868,6 +953,25 @@ mod tests {
         assert!(!state.overlay_click_through(), "saving the reset delay must keep click-through");
         state.set_overlay_click_through(true);
         assert!(state.overlay_click_through());
+    }
+
+    #[test]
+    fn automatic_update_check_defaults_on_and_survives_other_saves() {
+        let state = AppState::with_storage(None, None);
+        assert!(state.check_updates_automatically());
+        assert!(state.live(0).settings.check_updates_automatically);
+        assert_eq!(state.live(0).update_available, None);
+        state.set_update_found(Some("0.4.0".into()));
+        state.set_update_last_notified(Some("0.4.0".into()));
+        assert_eq!(state.live(0).update_available.as_deref(), Some("0.4.0"));
+        state.set_check_updates_automatically(false);
+        state.set_reset_after_secs(40);
+        assert!(!state.check_updates_automatically());
+        assert_eq!(state.update_last_notified().as_deref(), Some("0.4.0"));
+        assert_eq!(state.live(0).update_available.as_deref(), Some("0.4.0"));
+        state.set_update_skipped("0.4.0".into());
+        assert_eq!(state.live(0).update_available, None);
+        assert_eq!(state.update_last_notified().as_deref(), Some("0.4.0"));
     }
 
     #[test]

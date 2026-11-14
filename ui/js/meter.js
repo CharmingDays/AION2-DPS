@@ -320,6 +320,7 @@
     renderHistory(data.history || []);
     renderCapture(data.capture);
     if (data.settings) window.configPanel.update(data.settings, data.toast_styles);
+    if (window.updates) window.updates.sync(data);
   }
 
   function lost() {
