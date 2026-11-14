@@ -31,8 +31,8 @@ pub const MAX_DURATION_SECS: u32 = 600;
 /// Bumped when built-in timers are added or their hours/days change. A file
 /// below this is migrated once: missing built-ins are added and existing
 /// built-ins (matched by `default_id`) get the new schedule, keeping the
-/// user's enabled flags, lead times and custom events.
-pub const DEFAULTS_VERSION: u32 = 2;
+/// user's enabled flags, lead times, custom messages and custom events.
+pub const DEFAULTS_VERSION: u32 = 3;
 /// Used only when Region is Custom: a fixed UTC offset. Named regions use
 /// an IANA timezone (and follow daylight saving) instead.
 pub const DEFAULT_SERVER_OFFSET_MINS: i32 = -8 * 60;
@@ -513,7 +513,7 @@ pub fn default_alerts_for(region: Option<Region>) -> Vec<Alert> {
         builtin("executors", "Executors (Argo, Kaira, Tamasa)", "Chaotic Lower Reshanta", &executors, shift_repeat(Weekly { days: vec![3, 5] }, exec_day), Server, true),
         builtin("guardian-lord-nahma", "Guardian Lord Nahma", "", &nahma, shift_repeat(Weekly { days: vec![4, 6] }, nahma_day), Server, true),
         builtin("argo-spirit-king", "Argo, the Spirit King", "Chaotic Lower Reshanta", &argo, Hours { every: 12 }, Server, true),
-        builtin("spacetime-rift", "Spacetime Rift", "Open for 10 min", &rift, Hours { every: 3 }, Server, true),
+        builtin("spacetime-rift", "Spacetime Rift", "Open for 3 min", &rift, Hours { every: 3 }, Server, true),
         builtin("dimensional-invasion", "Dimensional Invasion", "Beritra Air Raid, Accursed Sword or Incursion of the Spirits; lasts 10 min", "00:30", Hours { every: 1 }, Server, true),
         builtin("shugo-festival", "Shugo Festival", "", "00:00", Hours { every: 1 }, Server, true),
         builtin("artifact-siege", "Artifact Siege", "", &siege, shift_repeat(Weekly { days: vec![3, 5] }, siege_day), Server, true),
@@ -524,10 +524,29 @@ pub fn default_alerts_for(region: Option<Region>) -> Vec<Alert> {
     ]
 }
 
+/// Official message texts a built-in has used. If `Some`, a saved message is
+/// only replaced when it is still one of these (a custom message is kept).
+/// `None` keeps the older behaviour of always writing the current default.
+fn official_messages(default_id: &str) -> Option<&'static [&'static str]> {
+    match default_id {
+        "spacetime-rift" => Some(&["Open for 10 min", "Open for 3 min"]),
+        _ => None,
+    }
+}
+
+fn should_sync_message(existing: &str, default_id: Option<&str>, current: &str) -> bool {
+    match default_id.and_then(official_messages) {
+        Some(known) => known.contains(&existing) || existing == current,
+        None => true,
+    }
+}
+
 /// Update existing built-in timers to the current schedule for `alerts.region`,
 /// keeping each one's enabled flag, lead times, duration and id. Custom events
-/// are left alone. Does not add missing built-ins; `restore_defaults` does that.
-/// Ids should already be canonical; this also remaps aliases to be safe.
+/// are left alone. Official built-in messages are updated to the current text
+/// unless the user has changed them. Does not add missing built-ins;
+/// `restore_defaults` does that. Ids should already be canonical; this also
+/// remaps aliases to be safe.
 pub fn sync_builtin_schedule(alerts: &mut Alerts) {
     canonicalize_default_ids(alerts);
     for builtin in default_alerts_for(alerts.region) {
@@ -539,7 +558,9 @@ pub fn sync_builtin_schedule(alerts: &mut Alerts) {
             continue;
         };
         existing.name = builtin.name;
-        existing.message = builtin.message;
+        if should_sync_message(&existing.message, builtin.default_id.as_deref(), &builtin.message) {
+            existing.message = builtin.message;
+        }
         existing.time = builtin.time;
         existing.repeat = builtin.repeat;
         existing.clock = builtin.clock;
@@ -909,12 +930,52 @@ mod tests {
         assert!(a.alerts.iter().all(|x| x.default_id.as_deref() != Some("beritra-air-raid")));
         let rift = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("spacetime-rift")).unwrap();
         assert_eq!(rift.time, "01:00");
+        assert_eq!(rift.message, "Open for 3 min");
         assert!(a.alerts.iter().any(|x| x.default_id.as_deref() == Some("weekly-reset")));
         assert!(a.alerts.iter().any(|x| x.default_id.as_deref() == Some("argo-spirit-king")));
         let argo = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("argo-spirit-king")).unwrap();
         assert_eq!(argo.time, "06:30");
         assert_eq!(argo.repeat, Some(Repeat::Hours { every: 12 }));
         assert!(!seed_defaults(&mut a));
+    }
+
+    #[test]
+    fn v3_updates_stock_rift_message_but_keeps_a_custom_one() {
+        let mut stock = Alerts::default();
+        stock.defaults_version = 2;
+        stock.alerts = vec![builtin(
+            "spacetime-rift",
+            "Spacetime Rift",
+            "Open for 10 min",
+            "01:00",
+            Repeat::Hours { every: 3 },
+            Clock::Server,
+            true,
+        )];
+        assert!(prepare_alerts(&mut stock));
+        assert_eq!(stock.defaults_version, DEFAULTS_VERSION);
+        assert_eq!(stock.alerts[0].message, "Open for 3 min");
+        assert!(!prepare_alerts(&mut stock), "repair is idempotent");
+
+        let mut custom = Alerts::default();
+        custom.defaults_version = 2;
+        let mut rift = builtin(
+            "spacetime-rift",
+            "Spacetime Rift",
+            "Open for 10 min",
+            "01:00",
+            Repeat::Hours { every: 3 },
+            Clock::Server,
+            true,
+        );
+        rift.message = "My own note".into();
+        rift.enabled = false;
+        custom.alerts = vec![rift];
+        assert!(prepare_alerts(&mut custom));
+        assert_eq!(custom.alerts[0].message, "My own note");
+        assert!(!custom.alerts[0].enabled);
+        assert_eq!(custom.defaults_version, DEFAULTS_VERSION);
+        assert!(!prepare_alerts(&mut custom), "repair is idempotent");
     }
 
     #[test]
