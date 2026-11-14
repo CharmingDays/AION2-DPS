@@ -32,7 +32,7 @@ pub const MAX_DURATION_SECS: u32 = 600;
 /// below this is migrated once: missing built-ins are added and existing
 /// built-ins (matched by `default_id`) get the new schedule, keeping the
 /// user's enabled flags, lead times, custom messages and custom events.
-pub const DEFAULTS_VERSION: u32 = 3;
+pub const DEFAULTS_VERSION: u32 = 4;
 /// Used only when Region is Custom: a fixed UTC offset. Named regions use
 /// an IANA timezone (and follow daylight saving) instead.
 pub const DEFAULT_SERVER_OFFSET_MINS: i32 = -8 * 60;
@@ -498,11 +498,11 @@ pub fn default_alerts_for(region: Option<Region>) -> Vec<Alert> {
     let shift = effective_region(region).west_shift_hours();
     // Hourly events fire at every :00 or :30 either way, so their anchor is
     // left unshifted and stays 00:00 / 00:30 in every region.
-    let (kaira, _) = add_hours("00:00", shift);
+    let (kaira, _) = add_hours("01:00", shift);
     let (executors, exec_day) = add_hours("17:30", shift);
     let (nahma, nahma_day) = add_hours("17:00", shift);
     let (argo, _) = add_hours("06:30", shift);
-    let (rift, _) = add_hours("01:00", shift);
+    let (rift, _) = add_hours("02:00", shift);
     let (siege, siege_day) = add_hours("17:00", shift);
     let (arena_day, _) = add_hours("07:00", shift);
     let (arena_day_end, _) = add_hours("10:00", shift);
@@ -929,7 +929,7 @@ mod tests {
         assert!(!invasion.enabled);
         assert!(a.alerts.iter().all(|x| x.default_id.as_deref() != Some("beritra-air-raid")));
         let rift = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("spacetime-rift")).unwrap();
-        assert_eq!(rift.time, "01:00");
+        assert_eq!(rift.time, "02:00");
         assert_eq!(rift.message, "Open for 3 min");
         assert!(a.alerts.iter().any(|x| x.default_id.as_deref() == Some("weekly-reset")));
         assert!(a.alerts.iter().any(|x| x.default_id.as_deref() == Some("argo-spirit-king")));
@@ -955,6 +955,7 @@ mod tests {
         assert!(prepare_alerts(&mut stock));
         assert_eq!(stock.defaults_version, DEFAULTS_VERSION);
         assert_eq!(stock.alerts[0].message, "Open for 3 min");
+        assert_eq!(stock.alerts[0].time, "02:00");
         assert!(!prepare_alerts(&mut stock), "repair is idempotent");
 
         let mut custom = Alerts::default();
@@ -973,6 +974,7 @@ mod tests {
         custom.alerts = vec![rift];
         assert!(prepare_alerts(&mut custom));
         assert_eq!(custom.alerts[0].message, "My own note");
+        assert_eq!(custom.alerts[0].time, "02:00");
         assert!(!custom.alerts[0].enabled);
         assert_eq!(custom.defaults_version, DEFAULTS_VERSION);
         assert!(!prepare_alerts(&mut custom), "repair is idempotent");
@@ -1012,10 +1014,10 @@ mod tests {
         assert_eq!(time(&east, "artifact-siege"), "20:00");
         assert_eq!(days(&west, "artifact-siege"), vec![3, 5]);
         assert_eq!(days(&east, "artifact-siege"), vec![3, 5]);
-        assert_eq!(time(&west, "spacetime-rift"), "01:00");
-        assert_eq!(time(&east, "spacetime-rift"), "04:00");
-        assert_eq!(time(&west, "watcher-kaira"), "00:00");
-        assert_eq!(time(&east, "watcher-kaira"), "03:00");
+        assert_eq!(time(&west, "spacetime-rift"), "02:00");
+        assert_eq!(time(&east, "spacetime-rift"), "05:00");
+        assert_eq!(time(&west, "watcher-kaira"), "01:00");
+        assert_eq!(time(&east, "watcher-kaira"), "04:00");
         assert_eq!(time(&west, "executors"), "17:30");
         assert_eq!(time(&east, "executors"), "20:30");
         assert_eq!(time(&west, "argo-spirit-king"), "06:30");

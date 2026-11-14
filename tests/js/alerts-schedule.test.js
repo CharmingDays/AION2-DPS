@@ -130,11 +130,11 @@ test('server and UTC clocks fire at the real instant, whatever the PC zone', () 
 
 test('named regions use DST-aware zones; unset defaults to NA West', () => {
   const u = (d, h, m) => Date.UTC(2026, 10, d, h, m);
-  // Sat Nov 14 2026 is standard time. A 13:00 PT rift is 21:00 UTC.
-  const rift = { id: 'r', name: 'Rift', time: '01:00', clock: 'server', repeat: { type: 'hours', every: 3 } };
+  // Sat Nov 14 2026 is standard time. A 14:00 PT rift is 22:00 UTC.
+  const rift = { id: 'r', name: 'Rift', time: '02:00', clock: 'server', repeat: { type: 'hours', every: 3 } };
   const west = { region: 'na-west' };
-  assert.strictEqual(s.nextAt(rift, u(14, 20, 33), west), u(14, 21, 0));
-  assert.strictEqual(s.nextAt(rift, u(14, 20, 33), {}), u(14, 21, 0), 'unset region uses NA West');
+  assert.strictEqual(s.nextAt(rift, u(14, 20, 33), west), u(14, 22, 0));
+  assert.strictEqual(s.nextAt(rift, u(14, 20, 33), {}), u(14, 22, 0), 'unset region uses NA West');
   // Siege Saturday 17:00 PT = Sunday 01:00 UTC.
   const siege = { id: 's', name: 'Siege', time: '17:00', clock: 'server', repeat: { type: 'weekly', days: [3, 5] } };
   assert.strictEqual(s.nextAt(siege, u(14, 12, 0), west), u(15, 1, 0));
