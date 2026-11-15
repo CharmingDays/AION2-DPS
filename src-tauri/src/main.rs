@@ -130,8 +130,10 @@ impl Args {
 struct Dashboard(String);
 
 #[tauri::command]
-fn live(state: State<'_, Arc<AppState>>) -> Live {
-    state.live(now_ms())
+fn live(app: AppHandle, state: State<'_, Arc<AppState>>) -> Live {
+    let live = state.live(now_ms());
+    persist_auto_saves(&app, &state);
+    live
 }
 
 #[tauri::command]
@@ -180,6 +182,11 @@ fn set_open_when_aion2(state: State<'_, Arc<AppState>>, on: bool) {
 #[tauri::command]
 fn set_toasts_only_when_aion2(state: State<'_, Arc<AppState>>, on: bool) {
     state.set_toasts_only_when_aion2(on);
+}
+
+#[tauri::command]
+fn set_auto_save_after_boss(state: State<'_, Arc<AppState>>, on: bool) {
+    state.set_auto_save_after_boss(on);
 }
 
 #[tauri::command]
@@ -1088,6 +1095,28 @@ fn show_page(app: &AppHandle, label: &str, page: &str, title: &str) -> tauri::Re
 /// it shows itself from them.
 const SKIP_WHEN_HIDDEN: [&str; 3] = [OVERLAY, METER, HISTORY];
 
+/// Write queued boss-fight sessions off the snapshot / capture path.
+fn persist_auto_saves(app: &AppHandle, state: &Arc<AppState>) {
+    let pending = state.take_pending_auto_saves();
+    if pending.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    let state = Arc::clone(state);
+    let _ = thread::Builder::new()
+        .name("aion2dps-auto-save".into())
+        .spawn(move || {
+            let summaries = state.write_auto_saves(pending);
+            if summaries.is_empty() {
+                return;
+            }
+            let _ = app.emit(SESSIONS_CHANGED, ());
+            for summary in summaries {
+                let _ = app.emit("session-saved", &summary);
+            }
+        });
+}
+
 /// Push a snapshot to every window. The payload is the same JSON as `/api/live`.
 fn push_snapshots(app: AppHandle, state: Arc<AppState>, windowless: bool) {
     thread::Builder::new()
@@ -1096,6 +1125,7 @@ fn push_snapshots(app: AppHandle, state: Arc<AppState>, windowless: bool) {
             let mut popup = aion2dps::boss_popup::BossPopup::default();
             loop {
                 let live = state.live(now_ms());
+                persist_auto_saves(&app, &state);
                 let keys = state.with_combat(|combat| combat.boss_detection_keys());
                 // Use the same restore action as the tray. Never steal focus
                 // when either normal app window is already visible.
@@ -1259,6 +1289,7 @@ fn main() {
             unlock,
             set_open_when_aion2,
             set_toasts_only_when_aion2,
+            set_auto_save_after_boss,
             set_minimize_to_tray,
             set_start_with_windows,
             set_pop_up_on_boss,

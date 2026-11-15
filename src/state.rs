@@ -129,6 +129,8 @@ pub struct AppState {
     check_updates_automatically: AtomicBool,
     /// Config: event notification toasts only while AION 2 is running. Default off.
     toasts_only_when_aion2: AtomicBool,
+    /// Config: auto-save a session when a boss fight ends. Default off.
+    auto_save_after_boss: AtomicBool,
     /// Last version we emitted `update-available` for (saved; no repeat notify).
     update_last_notified: Mutex<Option<String>>,
     /// Version the user skipped in the update dialog (saved).
@@ -229,6 +231,7 @@ impl AppState {
             overlay_click_through: AtomicBool::new(stored.overlay_click_through),
             check_updates_automatically: AtomicBool::new(stored.check_updates_automatically),
             toasts_only_when_aion2: AtomicBool::new(stored.toasts_only_when_aion2),
+            auto_save_after_boss: AtomicBool::new(stored.auto_save_after_boss),
             update_last_notified: Mutex::new(stored.update_last_notified.clone()),
             update_skipped: Mutex::new(stored.update_skipped.clone()),
             update_dismissed: Mutex::new(stored.update_dismissed.clone()),
@@ -315,7 +318,31 @@ impl AppState {
             .ok_or(sessions::Error::NothingToSave)?;
         let _saving = self.sessions_io.lock().unwrap_or_else(|e| e.into_inner());
         let id = sessions::save(dir, &session)?;
+        self.with_combat(|combat| combat.note_session_saved(session.started_at));
         Ok(Summary::of(id, &session))
+    }
+
+    pub fn take_pending_auto_saves(&self) -> Vec<crate::sessions::Session> {
+        self.with_combat(|combat| combat.take_pending_auto_saves())
+    }
+
+    /// Write already-built sessions. File work only; the combat lock is not held.
+    pub fn write_auto_saves(&self, sessions: Vec<crate::sessions::Session>) -> Vec<Summary> {
+        let Ok(dir) = self.sessions_dir() else {
+            return Vec::new();
+        };
+        if sessions.is_empty() {
+            return Vec::new();
+        }
+        let _saving = self.sessions_io.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        for session in sessions {
+            match sessions::save(dir, &session) {
+                Ok(id) => out.push(Summary::of(id, &session)),
+                Err(err) => tracing::warn!("could not auto-save session: {err}"),
+            }
+        }
+        out
     }
 
     pub fn sessions(&self) -> Vec<Summary> {
@@ -394,6 +421,7 @@ impl AppState {
         settings.debug_env = self.debug_env;
         settings.check_updates_automatically = self.check_updates_automatically();
         settings.toasts_only_when_aion2 = self.toasts_only_when_aion2();
+        settings.auto_save_after_boss = self.auto_save_after_boss();
         Live {
             cube_alerts: self.with_cubes(|cubes| {
                 if self.hidden_cube_alerts() {
@@ -553,6 +581,17 @@ impl AppState {
     /// Persist "only show event toasts while Aion 2 is running". Default is off.
     pub fn set_toasts_only_when_aion2(&self, on: bool) {
         self.toasts_only_when_aion2.store(on, Ordering::Relaxed);
+        self.store_settings();
+    }
+
+    pub fn auto_save_after_boss(&self) -> bool {
+        self.auto_save_after_boss.load(Ordering::Relaxed)
+    }
+
+    /// Persist "auto-save damage logs after boss fights". Default is off.
+    pub fn set_auto_save_after_boss(&self, on: bool) {
+        self.auto_save_after_boss.store(on, Ordering::Relaxed);
+        self.with_combat(|combat| combat.set_auto_save_after_boss(on));
         self.store_settings();
     }
 
@@ -729,6 +768,7 @@ impl AppState {
             overlay_click_through: self.overlay_click_through(),
             check_updates_automatically: self.check_updates_automatically(),
             toasts_only_when_aion2: self.toasts_only_when_aion2(),
+            auto_save_after_boss: self.auto_save_after_boss(),
             update_last_notified: self.update_last_notified(),
             update_skipped: Self::lock_opt(&self.update_skipped).clone(),
             update_dismissed: Self::lock_opt(&self.update_dismissed).clone(),
@@ -774,6 +814,8 @@ struct StoredSettings {
     check_updates_automatically: bool,
     /// Default off: event toasts still show when the game is closed.
     toasts_only_when_aion2: bool,
+    /// Default off: do not auto-save sessions after boss fights.
+    auto_save_after_boss: bool,
     /// Last version announced as available; do not notify about it again.
     update_last_notified: Option<String>,
     /// Version the user chose to skip in the update dialog.
@@ -810,6 +852,7 @@ impl Default for StoredSettings {
             overlay_click_through: true,
             check_updates_automatically: true,
             toasts_only_when_aion2: false,
+            auto_save_after_boss: false,
             update_last_notified: None,
             update_skipped: None,
             update_dismissed: None,
@@ -838,6 +881,7 @@ impl From<SettingsView> for StoredSettings {
             overlay_click_through: view.overlay_click_through,
             check_updates_automatically: view.check_updates_automatically,
             toasts_only_when_aion2: view.toasts_only_when_aion2,
+            auto_save_after_boss: view.auto_save_after_boss,
             update_last_notified: None,
             update_skipped: None,
             update_dismissed: None,
@@ -859,6 +903,7 @@ impl StoredSettings {
         let _ = combat.set_boss_lock_secs(self.boss_lock_secs, 0);
         let _ = combat.set_boss_damage_threshold(self.boss_damage_threshold);
         combat.set_boss_engage_lock(self.boss_engage_lock);
+        combat.set_auto_save_after_boss(self.auto_save_after_boss);
     }
 }
 
@@ -935,6 +980,7 @@ mod tests {
         assert!(stored.overlay_click_through);
         assert!(stored.check_updates_automatically);
         assert!(!stored.toasts_only_when_aion2);
+        assert!(!stored.auto_save_after_boss);
         assert_eq!(stored.update_last_notified, None);
         assert_eq!(stored.update_skipped, None);
         assert_eq!(stored.update_dismissed, None);
@@ -1016,6 +1062,20 @@ mod tests {
         assert!(state.toasts_only_when_aion2(), "saving the reset delay must keep the toast option");
         state.set_toasts_only_when_aion2(false);
         assert!(!state.toasts_only_when_aion2());
+    }
+
+    #[test]
+    fn auto_save_after_boss_defaults_off_and_survives_other_saves() {
+        let state = AppState::with_storage(None, None);
+        assert!(!state.auto_save_after_boss());
+        assert!(!state.live(0).settings.auto_save_after_boss);
+        state.set_auto_save_after_boss(true);
+        assert!(state.auto_save_after_boss());
+        assert!(state.live(0).settings.auto_save_after_boss);
+        state.set_reset_after_secs(40);
+        assert!(state.auto_save_after_boss(), "saving the reset delay must keep the auto-save option");
+        state.set_auto_save_after_boss(false);
+        assert!(!state.auto_save_after_boss());
     }
 
     #[test]

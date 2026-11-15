@@ -140,9 +140,17 @@ async fn page(uri: Uri) -> impl IntoResponse {
 }
 
 async fn live(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let live = state.live(now_ms());
+    let pending = state.take_pending_auto_saves();
+    if !pending.is_empty() {
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = state.write_auto_saves(pending);
+        });
+    }
     (
         [(header::CACHE_CONTROL, "no-store")],
-        Json(state.live(now_ms())),
+        Json(live),
     )
 }
 
@@ -171,6 +179,7 @@ struct SettingsBody {
     boss_engage_lock: Option<bool>,
     open_when_aion2: Option<bool>,
     toasts_only_when_aion2: Option<bool>,
+    auto_save_after_boss: Option<bool>,
     minimize_to_tray: Option<bool>,
     overlay_click_through: Option<bool>,
     hidden_cube_alerts: Option<bool>,
@@ -220,6 +229,9 @@ async fn settings(
     }
     if let Some(on) = body.toasts_only_when_aion2 {
         state.set_toasts_only_when_aion2(on);
+    }
+    if let Some(on) = body.auto_save_after_boss {
+        state.set_auto_save_after_boss(on);
     }
     if let Some(on) = body.minimize_to_tray {
         state.set_minimize_to_tray(on);

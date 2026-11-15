@@ -16,7 +16,7 @@
   const SECTIONS = [
     { id: 'general', label: 'General', blurb: 'App start-up, tray behaviour and how you appear in the meter.' },
     { id: 'overlay', label: 'Overlay', blurb: 'The compact always-on-top window.' },
-    { id: 'meter', label: 'Meter', blurb: 'When a fight resets and how bosses hold the view.' },
+    { id: 'meter', label: 'Meter', blurb: 'When a fight resets, how bosses hold the view, and session auto-save.' },
     { id: 'alerts', label: 'Alerts & Notifications', blurb: 'Event alert toasts, sound and position, plus the pet progress toast.' },
     { id: 'toasts', label: 'Toasts & pop-ups', blurb: 'How each pop-up looks and where it shows. Pick a type, then change its size, place, text and colours.' },
     { id: 'exploration', label: 'Exploration', blurb: 'Passive alerts for things found while exploring.' },
@@ -83,6 +83,10 @@
     { id: 'boss_damage_threshold', section: 'meter', card: 'Boss lock', type: 'damage', default: 1500000, advanced: true,
       label: 'Boss damage threshold', desc: 'A target that takes this much damage counts as a boss. Like 1,500,000 or 1.5m.',
       keywords: ['boss', 'damage', 'threshold', 'hp'] },
+    { id: 'auto_save_after_boss', section: 'meter', card: 'Sessions', type: 'toggle', default: false,
+      label: 'Auto-save damage logs after boss fights',
+      desc: 'When a boss dies or a boss fight times out, write the log to History the same way Save session does. Skips trash-only pulls, training dummies, and short fights that only crossed the boss damage threshold. Off by default.',
+      keywords: ['save', 'session', 'history', 'boss', 'log', 'automatic', 'fight'] },
 
     { id: 'alert_enabled', section: 'alerts', card: 'Event alerts', type: 'toggle', default: true, store: 'alerts', key: 'enabled',
       label: 'Event alerts', desc: 'Warn me before scheduled events start.', keywords: ['event', 'timer', 'schedule', 'notification'] },

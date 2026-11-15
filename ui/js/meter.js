@@ -24,6 +24,7 @@
     save: (type, name) => bridge.setMonsterName(type, name),
   });
   const saving = window.sessionSave.create($('save-session'), { save: () => bridge.saveSession() });
+  bridge.onSessionSaved((summary) => saving.markSaved(summary));
 
   const nameClass = (name, you) => (you ? 'you' : name === UNKNOWN ? 'unknown' : '');
 

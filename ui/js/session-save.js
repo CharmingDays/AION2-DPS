@@ -40,11 +40,20 @@
       }
     });
 
+    function markSaved(summary) {
+      if (busy) return;
+      busy = true;
+      paint();
+      settle('saved', 'Saved');
+      if (onSaved && summary) onSaved(summary);
+    }
+
     return {
       update(hasDamage) {
         canSave = hasDamage;
         paint();
       },
+      markSaved,
     };
   }
 

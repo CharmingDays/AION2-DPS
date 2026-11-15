@@ -73,6 +73,10 @@
     window.addEventListener('focus', () => callback());
   }
 
+  function onSessionSaved(callback) {
+    if (inApp) tauri.event.listen('session-saved', (event) => callback(event.payload)).catch(() => {});
+  }
+
   /** Alert changes in the app are announced; a browser tab rechecks on focus and every 30 s. */
   function onAlertsChanged(callback) {
     if (inApp) tauri.event.listen('alerts', () => callback()).catch(() => {});
@@ -104,6 +108,9 @@
     setToastsOnlyWhenAion2: (on) => (inApp
       ? tauri.core.invoke('set_toasts_only_when_aion2', { on })
       : post('/api/settings', { toasts_only_when_aion2: on })),
+    setAutoSaveAfterBoss: (on) => (inApp
+      ? tauri.core.invoke('set_auto_save_after_boss', { on })
+      : post('/api/settings', { auto_save_after_boss: on })),
     setMinimizeToTray: (on) => (inApp
       ? tauri.core.invoke('set_minimize_to_tray', { on })
       : post('/api/settings', { minimize_to_tray: on })),
@@ -155,6 +162,7 @@
       : send('PATCH', sessionPath(id), { name }, WRITE)),
     exportSession,
     onSessionsChanged,
+    onSessionSaved,
     getAlerts: () => (inApp ? tauri.core.invoke('get_alerts') : get('/api/alerts')),
     setAlerts: (alerts) => (inApp ? tauri.core.invoke('set_alerts', { alerts }) : send('PUT', '/api/alerts', alerts, WRITE)),
     restoreDefaultAlerts: () => (inApp ? tauri.core.invoke('restore_default_alerts') : post('/api/alerts/restore-defaults', undefined, WRITE)),

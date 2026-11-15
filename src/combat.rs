@@ -26,6 +26,10 @@ pub const MAX_BOSS_LOCK_SECS: u64 = 60;
 pub const DEFAULT_BOSS_DAMAGE: i64 = 1_500_000;
 pub const MIN_BOSS_DAMAGE: i64 = 1_000;
 pub const MAX_BOSS_DAMAGE: i64 = 1_000_000_000_000;
+/// Shortest active fight clock for an auto-saved threshold-only boss.
+/// Table-flagged bosses are saved even if the fight is shorter.
+pub const MIN_AUTO_SAVE_MS: i64 = 10_000;
+const SAVED_STARTS_LIMIT: usize = 32;
 /// A flag-3 removal this soon after a hit, with HP never at 0, is cleanup
 /// (out of range, zone change), not a kill.
 pub const KILL_GUARD_MS: i64 = 1_500;
@@ -429,6 +433,8 @@ pub struct SettingsView {
     pub check_updates_automatically: bool,
     /// AppState-owned: event toasts only while AION 2 is running. Default off.
     pub toasts_only_when_aion2: bool,
+    /// AppState-owned: auto-save a session when a boss fight ends. Default off.
+    pub auto_save_after_boss: bool,
     /// AppState-owned passive cube alert preference.
     pub hidden_cube_alerts: bool,
     /// AppState-owned: pet soul progress toasts, and seconds they stay.
@@ -560,6 +566,12 @@ pub struct Combat {
     stagger_learned: HashMap<i32, Vec<(u32, u32)>>,
     /// Every stagger share of the open fight, for a saved session.
     stagger_shares: Vec<StaggerShare>,
+    /// Config: write a session when a boss fight ends. Default off.
+    auto_save_after_boss: bool,
+    /// `started_at` of fights already saved (manual or auto) this session.
+    saved_starts: Vec<i64>,
+    /// Sessions queued at fight end; written off the capture path.
+    pending_auto_saves: Vec<Session>,
 }
 
 impl Default for Combat {
@@ -609,6 +621,9 @@ impl Combat {
             gauges: HashMap::new(),
             stagger_learned: HashMap::new(),
             stagger_shares: Vec::new(),
+            auto_save_after_boss: false,
+            saved_starts: Vec::new(),
+            pending_auto_saves: Vec::new(),
         }
     }
 
@@ -632,6 +647,7 @@ impl Combat {
             overlay_click_through: true,
             check_updates_automatically: true,
             toasts_only_when_aion2: false,
+            auto_save_after_boss: self.auto_save_after_boss,
             hidden_cube_alerts: true,
             pet_toasts: true,
             pet_toast_secs: crate::pets::DEFAULT_TOAST_SECS,
@@ -669,6 +685,22 @@ impl Combat {
         if let Some(lock) = self.locked.as_mut() {
             lock.view.engage_lock = on;
         }
+    }
+
+    pub fn set_auto_save_after_boss(&mut self, on: bool) {
+        self.auto_save_after_boss = on;
+        if let Some(lock) = self.locked.as_mut() {
+            lock.view.auto_save_after_boss = on;
+        }
+    }
+
+    /// Remember a fight that was already written, so auto-save does not repeat it.
+    pub fn note_session_saved(&mut self, started_at: i64) {
+        self.remember_saved_start(started_at);
+    }
+
+    pub fn take_pending_auto_saves(&mut self) -> Vec<Session> {
+        std::mem::take(&mut self.pending_auto_saves)
     }
 
     pub fn is_locked(&self) -> bool {
@@ -745,8 +777,12 @@ impl Combat {
 
     /// The frozen fight goes to history like any finished fight.
     fn release(&mut self, lock: Box<Lock>) {
-        let view = lock.view;
+        let mut view = lock.view;
         let end = view.last_ms.unwrap_or(lock.died_ms);
+        if let Some(session) = view.fight_session_as_boss(end) {
+            let qualifies = Self::qualifies_auto_save(&session, &view);
+            self.push_auto_save(session, qualifies);
+        }
         let rows = view.archive_rows(end);
         self.push_history(rows);
     }
@@ -765,6 +801,8 @@ impl Combat {
         view.history.clear();
         view.locked = None;
         view.boss_death = None;
+        view.pending_auto_saves.clear();
+        view.saved_starts.clear();
         view.pinned = Some(boss);
         view.reset_after_ms = i64::MAX / 4;
         self.clear_fight();
@@ -1603,6 +1641,10 @@ impl Combat {
     }
 
     fn finish(&mut self, now: i64) {
+        if let Some(session) = self.fight_session_as_boss(now) {
+            let qualifies = Self::qualifies_auto_save(&session, self);
+            self.push_auto_save(session, qualifies);
+        }
         self.archive(now);
         self.clear_fight();
     }
@@ -1956,6 +1998,78 @@ impl Combat {
                 })
                 .collect(),
         })
+    }
+
+    /// A session of this fight as if the meter were in Boss mode, so trash
+    /// currently targeted does not replace the boss.
+    fn fight_session_as_boss(&mut self, now: i64) -> Option<Session> {
+        let prev = self.mode;
+        self.mode = TargetMode::Boss;
+        let session = self.fight_session(now);
+        self.mode = prev;
+        session
+    }
+
+    fn push_auto_save(&mut self, session: Session, qualifies: bool) {
+        if !self.auto_save_after_boss || !qualifies {
+            return;
+        }
+        if self.saved_starts.contains(&session.started_at) {
+            return;
+        }
+        self.remember_saved_start(session.started_at);
+        self.pending_auto_saves.push(session);
+    }
+
+    fn remember_saved_start(&mut self, started_at: i64) {
+        if self.saved_starts.contains(&started_at) {
+            return;
+        }
+        self.saved_starts.push(started_at);
+        let extra = self.saved_starts.len().saturating_sub(SAVED_STARTS_LIMIT);
+        if extra > 0 {
+            self.saved_starts.drain(..extra);
+        }
+    }
+
+    fn qualifies_auto_save(session: &Session, fight: &Combat) -> bool {
+        if session.totals.total_damage <= 0 {
+            return false;
+        }
+        if session.target.dummy {
+            return false;
+        }
+        if !session.target.boss && !fight.has_damaged_boss() {
+            return false;
+        }
+        if session.duration_ms < MIN_AUTO_SAVE_MS && !fight.has_damaged_table_boss() {
+            return false;
+        }
+        true
+    }
+
+    fn has_damaged_boss(&self) -> bool {
+        self.targets.iter().any(|(id, target)| {
+            target.damage > 0 && self.target_is_boss(*id) && !self.target_is_dummy(*id)
+        })
+    }
+
+    fn has_damaged_table_boss(&self) -> bool {
+        self.targets.iter().any(|(id, target)| {
+            target.damage > 0 && self.target_is_table_boss(*id) && !self.target_is_dummy(*id)
+        })
+    }
+
+    fn target_is_table_boss(&self, id: i32) -> bool {
+        self.monster_type(id)
+            .and_then(monster_names::bundled)
+            .is_some_and(|b| b.boss)
+    }
+
+    fn target_is_dummy(&self, id: i32) -> bool {
+        self.monster_type(id)
+            .and_then(monster_names::bundled)
+            .is_some_and(|b| b.dummy)
     }
 
     fn player_row(&self, id: i32, actor: Actor, encounter: i64, active_ms: i64) -> PlayerRow {
@@ -3704,5 +3818,83 @@ mod tests {
         assert!(combat.snapshot(0).stagger.is_none());
         combat.apply(gauge(ADD_ID, 1_000), 0);
         assert!(combat.snapshot(0).stagger.is_none(), "another entity's gauge");
+    }
+
+    /// Hits every 2 s for 12 s, enough to pass the auto-save duration floor.
+    fn long_threshold_boss(combat: &mut Combat, start: i64) {
+        for (i, at) in (0..=6).map(|n| (n, start + n * 2_000)) {
+            let damage = if i == 0 { 1_200_000 } else { 80_000 };
+            combat.apply(Event::Hit(hit(1, BOSS_ID, 100, damage)), at);
+        }
+    }
+
+    #[test]
+    fn auto_save_is_off_by_default_and_skips_trash_and_short_fights() {
+        let mut combat = spawned();
+        long_threshold_boss(&mut combat, 1_000);
+        combat.apply(Event::LiveHp { id: BOSS_ID, hp: 0 }, 14_000);
+        combat.unlock();
+        assert!(combat.take_pending_auto_saves().is_empty());
+
+        let mut combat = spawned();
+        combat.set_auto_save_after_boss(true);
+        // Trash only, even if the fight is long.
+        for n in 0..=6 {
+            combat.apply(Event::Hit(hit(1, ADD_ID, 100, 10_000)), 1_000 + n * 2_000);
+        }
+        combat.tick(1_000 + 12_000 + ENCOUNTER_IDLE_MS);
+        assert!(combat.take_pending_auto_saves().is_empty());
+
+        let mut combat = spawned();
+        combat.set_auto_save_after_boss(true);
+        boss_dies_at(&mut combat, 10_000);
+        combat.unlock();
+        assert!(
+            combat.take_pending_auto_saves().is_empty(),
+            "a one-hit threshold boss is too short"
+        );
+    }
+
+    #[test]
+    fn auto_save_queues_a_boss_fight_once_when_the_lock_ends() {
+        let mut combat = spawned();
+        combat.set_auto_save_after_boss(true);
+        long_threshold_boss(&mut combat, 1_000);
+        combat.apply(Event::LiveHp { id: BOSS_ID, hp: 0 }, 14_000);
+        assert!(combat.is_locked());
+        assert!(combat.take_pending_auto_saves().is_empty(), "wait until the lock ends");
+        combat.tick(14_000 + 10_000);
+        let saved = combat.take_pending_auto_saves();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].target.boss && saved[0].target.defeated);
+        assert_eq!(saved[0].totals.total_damage, 1_680_000);
+        assert!(saved[0].duration_ms >= MIN_AUTO_SAVE_MS);
+        combat.tick(14_000 + 10_000);
+        assert!(combat.take_pending_auto_saves().is_empty(), "the same fight is not saved twice");
+    }
+
+    #[test]
+    fn auto_save_skips_a_fight_that_was_already_saved_by_hand() {
+        let mut combat = spawned();
+        combat.set_auto_save_after_boss(true);
+        long_threshold_boss(&mut combat, 1_000);
+        combat.apply(Event::LiveHp { id: BOSS_ID, hp: 0 }, 14_000);
+        let session = combat.session(14_000).unwrap();
+        combat.note_session_saved(session.started_at);
+        combat.unlock();
+        assert!(combat.take_pending_auto_saves().is_empty());
+    }
+
+    #[test]
+    fn auto_save_queues_when_a_boss_fight_idles_out() {
+        let mut combat = spawned();
+        combat.set_auto_save_after_boss(true);
+        combat.set_boss_lock_secs(0, 0);
+        long_threshold_boss(&mut combat, 1_000);
+        combat.tick(13_000 + ENCOUNTER_IDLE_MS);
+        let saved = combat.take_pending_auto_saves();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].target.boss);
+        assert!(!saved[0].target.defeated);
     }
 }

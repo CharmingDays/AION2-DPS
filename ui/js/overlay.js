@@ -57,6 +57,7 @@
       hintUntil = Date.now() + window.sessionSave.SAVED_MS;
     },
   });
+  bridge.onSessionSaved((summary) => saving.markSaved(summary));
 
   function readLevel() {
     const n = Number(localStorage.getItem(OPACITY_KEY));
