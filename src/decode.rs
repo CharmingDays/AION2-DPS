@@ -524,6 +524,10 @@ fn parse_damage(packet: &[u8], allow_embedded: bool, trusted_only: bool) -> Vec<
 }
 
 fn classify_link(skill: i32, actor: i32, target: i32) -> Option<(i32, i32)> {
+    // 16990002/3 are Water/Wind Spirit basic attacks, not link records.
+    if crate::skills::is_spirit_skill(skill) {
+        return None;
+    }
     if SPIRIT_TO_OWNER.contains(&skill) {
         Some((actor, target))
     } else if OWNER_TO_SPIRIT.contains(&skill) {
@@ -1372,6 +1376,13 @@ mod tests {
         let hits = feed(record);
         assert_eq!(hits.len(), 1, "{record} -> {hits:?}");
         hits.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn water_spirit_basic_attack_is_not_a_spirit_link() {
+        assert_eq!(classify_link(16_990_002, 50, 500), None);
+        assert_eq!(classify_link(16_990_003, 50, 500), None);
+        assert_eq!(classify_link(16_770_000, 1, 50), Some((50, 1)));
     }
 
     #[test]

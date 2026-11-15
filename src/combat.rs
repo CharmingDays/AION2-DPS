@@ -1530,6 +1530,7 @@ impl Combat {
         }
         self.record(now, hit);
         self.note(now, hit, false, false);
+        self.maybe_link_spirit(hit.actor, hit.skill);
     }
 
     fn record_heal(&mut self, now: i64, hit: &Hit, actor: i32) {
@@ -1776,7 +1777,7 @@ impl Combat {
                 continue;
             };
             for (actor_id, actor) in &target.actors {
-                let owner = self.owner_of(*actor_id);
+                let owner = self.credited_actor(*actor_id);
                 merged.entry(owner).or_default().merge(actor);
             }
         }
@@ -1915,7 +1916,7 @@ impl Combat {
             .iter()
             .filter(|event| counted.contains(&event.target))
             .filter_map(|event| {
-                let actor = *index.get(&self.named_id(event.actor))?;
+                let actor = *index.get(&self.named_id(self.credited_actor(event.actor)))?;
                 let mut flags = 0;
                 if event.crit {
                     flags |= sessions::FLAG_CRIT;
@@ -1994,7 +1995,7 @@ impl Combat {
                 .iter()
                 .filter(|share| counted.contains(&share.target))
                 .filter_map(|share| {
-                    let actor = *index.get(&self.named_id(share.actor))?;
+                    let actor = *index.get(&self.named_id(self.credited_actor(share.actor)))?;
                     let t_ms = share.at.saturating_sub(started_at).max(0);
                     let points = (share.points * 100.0).round() / 100.0;
                     Some(sessions::Stagger(t_ms, actor, points, share.skill))
@@ -2232,10 +2233,152 @@ impl Combat {
     /// a heal names an NPC unreliably (`05 38`).
     fn credited_heal_actor(&self, actor: i32, skill: i32) -> i32 {
         let owner = self.owner_of(actor);
-        if self.trust_heal_actor(owner) {
+        if owner != actor && self.trust_heal_actor(owner) {
             owner
+        } else if let Some(sm) = self.infer_spirit_owner(actor) {
+            sm
         } else {
             self.unique_player_healer(skill).unwrap_or(owner)
+        }
+    }
+
+    /// The player this entity should be shown under: its summon owner when
+    /// known, else the unique Spiritmaster for an unlinked spirit pet.
+    fn credited_actor(&self, id: i32) -> i32 {
+        let owner = self.owner_of(id);
+        if owner != id && self.trust_heal_actor(owner) {
+            owner
+        } else {
+            self.infer_spirit_owner(id).unwrap_or(owner)
+        }
+    }
+
+    fn maybe_link_spirit(&mut self, actor: i32, skill: i32) {
+        if !crate::skills::is_spirit_skill(skill) {
+            return;
+        }
+        if let Some(owner) = self.infer_spirit_owner(actor) {
+            self.link(actor, owner);
+        }
+    }
+
+    /// Skills this entity has used on counted targets or as heals.
+    fn actor_skills(&self, id: i32) -> Vec<i32> {
+        let mut skills = Vec::new();
+        for target in self.targets.values() {
+            if let Some(actor) = target.actors.get(&id) {
+                skills.extend(actor.skills.keys().map(|(skill, _)| *skill));
+            }
+        }
+        for ((actor, skill, _), _) in &self.heal_skills {
+            if *actor == id {
+                skills.push(*skill);
+            }
+        }
+        skills
+    }
+
+    fn acts_as_spirit(&self, id: i32) -> bool {
+        let skills = self.actor_skills(id);
+        if skills.is_empty() {
+            return self.summons.contains(&id);
+        }
+        skills.iter().all(|skill| crate::skills::is_spirit_skill(*skill))
+    }
+
+    fn actor_spirit_families(&self, id: i32) -> Vec<&'static str> {
+        let mut found = Vec::new();
+        for skill in self.actor_skills(id) {
+            if let Some(family) = crate::skills::spirit_family(skill) {
+                if !found.contains(&family) {
+                    found.push(family);
+                }
+            }
+        }
+        found
+    }
+
+    fn spiritmasters(&self) -> Vec<i32> {
+        let mut ids = HashSet::new();
+        for target in self.targets.values() {
+            for (actor_id, actor) in &target.actors {
+                if actor
+                    .skills
+                    .keys()
+                    .any(|(skill, _)| crate::skills::is_spiritmaster_skill(*skill))
+                {
+                    ids.insert(self.owner_of(*actor_id));
+                }
+            }
+        }
+        for ((actor, skill, _), _) in &self.heal_skills {
+            if crate::skills::is_spiritmaster_skill(*skill) {
+                ids.insert(self.owner_of(*actor));
+            }
+        }
+        let mut out: Vec<i32> = ids.into_iter().collect();
+        out.sort_unstable();
+        out
+    }
+
+    fn sm_has_family(&self, sm: i32, family: &str) -> bool {
+        self.actor_skills(sm)
+            .into_iter()
+            .chain(self.linked_spirit_skills(sm))
+            .any(|skill| crate::skills::spirit_family(skill) == Some(family))
+    }
+
+    fn linked_spirit_skills(&self, sm: i32) -> Vec<i32> {
+        let mut skills = Vec::new();
+        for target in self.targets.values() {
+            for (actor_id, actor) in &target.actors {
+                if self.owner_of(*actor_id) == sm && *actor_id != sm {
+                    skills.extend(actor.skills.keys().map(|(skill, _)| *skill));
+                }
+            }
+        }
+        for ((actor, skill, _), _) in &self.heal_skills {
+            if self.owner_of(*actor) == sm && *actor != sm {
+                skills.push(*skill);
+            }
+        }
+        skills
+    }
+
+    /// When this unlinked spirit can be attributed to one Spiritmaster.
+    fn infer_spirit_owner(&self, id: i32) -> Option<i32> {
+        let owner = self.owner_of(id);
+        // An unlinked spirit is often noted as a player when it first hits, so
+        // trust_heal_actor alone cannot mean already has a real owner.
+        if owner != id && self.trust_heal_actor(owner) {
+            return None;
+        }
+        let spirit = if self.acts_as_spirit(id) {
+            id
+        } else if owner != id && self.acts_as_spirit(owner) {
+            owner
+        } else {
+            return None;
+        };
+        let masters = self.spiritmasters();
+        match masters.len() {
+            1 => Some(masters[0]),
+            n if n > 1 => {
+                let families = self.actor_spirit_families(spirit);
+                if families.is_empty() {
+                    return None;
+                }
+                let matches: Vec<i32> = masters
+                    .into_iter()
+                    .filter(|sm| families.iter().all(|family| self.sm_has_family(*sm, family)))
+                    .collect();
+                if matches.len() == 1 {
+                    Some(matches[0])
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -3286,6 +3429,39 @@ mod tests {
                 sessions::Heal(200, 0, 500, sessions::FLAG_HOT, 18_730_000),
             ]
         );
+    }
+
+    #[test]
+    fn unlinked_spirit_damage_folds_into_the_only_spiritmaster() {
+        let mut combat = Combat::new();
+        combat.set_name(1, "Xia", false);
+        combat.apply_hit(&hit(1, 9, 16_120_000, 100), 0);
+        combat.apply_hit(&hit(50, 9, 16_130_001, 400), 100);
+        combat.apply_hit(&hit(51, 9, 100_045, 200), 200);
+        let snap = combat.snapshot(1_000);
+        assert_eq!(snap.players.len(), 1);
+        assert_eq!(snap.players[0].name, "Xia");
+        assert_eq!(snap.players[0].damage, 700);
+        let session = combat.session(1_000).unwrap();
+        assert_eq!(session.actors, ["Xia"]);
+        assert_eq!(session.players[0].total, 700);
+    }
+
+    #[test]
+    fn a_spirit_with_two_spiritmasters_folds_only_when_the_family_is_unique() {
+        let mut combat = Combat::new();
+        combat.set_name(1, "Xia", false);
+        combat.set_name(2, "Ryn", false);
+        combat.apply_hit(&hit(1, 9, 16_120_000, 100), 0);
+        combat.apply_hit(&hit(2, 9, 16_110_000, 100), 0);
+        combat.apply_hit(&hit(50, 9, 16_130_001, 400), 100);
+        let mid = combat.snapshot(1_000);
+        assert!(mid.players.iter().any(|p| p.damage == 400 && p.name != "Xia" && p.name != "Ryn"));
+        combat.apply_hit(&hit(51, 9, 16_120_001, 200), 200);
+        let snap = combat.snapshot(2_000);
+        let xia = snap.players.iter().find(|p| p.name == "Xia").unwrap();
+        assert_eq!(xia.damage, 300);
+        assert!(snap.players.iter().any(|p| p.name != "Xia" && p.name != "Ryn" && p.damage == 400));
     }
 
     const BOSS_ID: i32 = 500;

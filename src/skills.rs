@@ -41,6 +41,33 @@ pub fn skill_name(id: i32) -> String {
         .unwrap_or_else(|| id.to_string())
 }
 
+/// A spirit pet's own skill, such as "Earth Spirit: Tackle". Not a
+/// Spiritmaster spell such as "Summon: Wind Spirit" or "Spirit's Benediction".
+pub fn is_spirit_skill(id: i32) -> bool {
+    skill_name(id).contains(" Spirit:")
+}
+
+/// A Spiritmaster's own spell (summon, dismiss, Benediction, Fusion, and
+/// the like), not a spirit pet skill.
+pub fn is_spiritmaster_skill(id: i32) -> bool {
+    if is_spirit_skill(id) {
+        return false;
+    }
+    let name = skill_name(id);
+    name.contains("Spirit") || name == "Elemental Fusion" || name.starts_with("Dimensional Control")
+}
+
+const SPIRIT_FAMILIES: [&str; 5] = ["Ancient", "Fire", "Water", "Wind", "Earth"];
+
+/// The elemental family of a spirit pet skill or of "Summon: Fire Spirit"
+/// / "Dismiss: Fire Spirit".
+pub fn spirit_family(id: i32) -> Option<&'static str> {
+    let name = skill_name(id);
+    SPIRIT_FAMILIES
+        .into_iter()
+        .find(|family| name.contains(family) && name.contains("Spirit"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,5 +91,20 @@ mod tests {
         assert_eq!(skill_name(14_020_111), "Snipe");
         assert_eq!(canonical_skill_id(1_609_010), 1_609_010);
         assert_eq!(skill_name(1_609_010), "Commence Hunt");
+    }
+
+    #[test]
+    fn spirit_pet_skills_are_not_spiritmaster_spells() {
+        assert!(is_spirit_skill(16_130_001));
+        assert_eq!(spirit_family(16_130_001), Some("Earth"));
+        assert!(!is_spiritmaster_skill(16_130_001));
+        assert!(is_spirit_skill(16_990_002), "Water Spirit basic attack");
+        assert!(!is_spirit_skill(16_120_000));
+        assert!(is_spiritmaster_skill(16_120_000), "Summon: Wind Spirit");
+        assert_eq!(spirit_family(16_120_000), Some("Wind"));
+        assert!(is_spiritmaster_skill(16_190_000));
+        assert!(is_spiritmaster_skill(16_300_000));
+        assert!(!is_spirit_skill(16_770_000));
+        assert!(is_spiritmaster_skill(16_770_000), "Spirit Communion");
     }
 }

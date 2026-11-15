@@ -325,6 +325,7 @@ pub fn load(dir: &Path, id: &str) -> Result<Session, Error> {
     let mut session = parse(&std::fs::read(file(dir, id)?)?)?;
     fill_skill_names(&mut session);
     reassign_misattributed_heals(&mut session);
+    fold_unlinked_spirit_actors(&mut session);
     Ok(session)
 }
 
@@ -438,6 +439,140 @@ fn reassign_misattributed_heals(session: &mut Session) {
         }
     }
 
+    compact_unused_actors(session);
+}
+
+/// Unlinked spirit-pet rows (only "Earth Spirit: …" and the like) are
+/// folded into the Spiritmaster when that assignment is unambiguous: one
+/// Spiritmaster in the session, or, with several, the one whose summon
+/// or already-folded skills uniquely match the spirit's family. The file
+/// on disk is left as it was saved.
+fn fold_unlinked_spirit_actors(session: &mut Session) {
+    let n = session.actors.len();
+    if n == 0 {
+        return;
+    }
+    let skills_of = |session: &Session, i: u32| -> Vec<i32> {
+        session
+            .events
+            .iter()
+            .filter(|event| event.1 == i)
+            .map(|event| event.4)
+            .chain(
+                session
+                    .heals
+                    .iter()
+                    .filter(|heal| heal.1 == i)
+                    .map(|heal| heal.4),
+            )
+            .collect()
+    };
+    let masters: Vec<u32> = (0..n as u32)
+        .filter(|i| {
+            skills_of(session, *i)
+                .iter()
+                .any(|skill| crate::skills::is_spiritmaster_skill(*skill))
+        })
+        .collect();
+    if masters.is_empty() {
+        return;
+    }
+    let dest_for = |spirit: u32| -> Option<u32> {
+        let skills = skills_of(session, spirit);
+        if skills.is_empty() || !skills.iter().all(|skill| crate::skills::is_spirit_skill(*skill)) {
+            return None;
+        }
+        if masters.len() == 1 {
+            return Some(masters[0]);
+        }
+        let mut families = Vec::new();
+        for skill in &skills {
+            if let Some(family) = crate::skills::spirit_family(*skill) {
+                if !families.contains(&family) {
+                    families.push(family);
+                }
+            }
+        }
+        if families.is_empty() {
+            return None;
+        }
+        let matches: Vec<u32> = masters
+            .iter()
+            .copied()
+            .filter(|sm| {
+                let sm_skills = skills_of(session, *sm);
+                families.iter().all(|family| {
+                    sm_skills
+                        .iter()
+                        .any(|skill| crate::skills::spirit_family(*skill) == Some(*family))
+                })
+            })
+            .collect();
+        (matches.len() == 1).then_some(matches[0])
+    };
+
+    let mut moves: Vec<(u32, u32)> = Vec::new();
+    for spirit in 0..n as u32 {
+        if let Some(dest) = dest_for(spirit) {
+            if dest != spirit {
+                moves.push((spirit, dest));
+            }
+        }
+    }
+    if moves.is_empty() {
+        return;
+    }
+    for (spirit, dest) in &moves {
+        for event in &mut session.events {
+            if event.1 == *spirit {
+                event.1 = *dest;
+            }
+        }
+        for heal in &mut session.heals {
+            if heal.1 == *spirit {
+                heal.1 = *dest;
+            }
+        }
+        for row in &mut session.stagger {
+            if row.1 == *spirit {
+                row.1 = *dest;
+            }
+        }
+        let from = session.players.get(*spirit as usize).cloned();
+        if let (Some(from), Some(to)) = (from, session.players.get_mut(*dest as usize)) {
+            to.total += from.total;
+            to.heal += from.heal;
+        }
+        if let Some(from) = session.players.get_mut(*spirit as usize) {
+            from.total = 0;
+            from.heal = 0;
+            from.dps = 0;
+            from.hps = 0;
+            from.share = 0.0;
+        }
+        if session.you == Some(*spirit) {
+            session.you = Some(*dest);
+        }
+    }
+    let duration = session.duration_ms;
+    let group = session.totals.total_damage;
+    for player in &mut session.players {
+        player.dps = if duration <= 0 {
+            0
+        } else {
+            player.total.saturating_mul(1000) / duration
+        };
+        player.hps = if duration <= 0 {
+            0
+        } else {
+            player.heal.saturating_mul(1000) / duration
+        };
+        player.share = if group > 0 {
+            (player.total as f64 * 1000.0 / group as f64).round() / 10.0
+        } else {
+            0.0
+        };
+    }
     compact_unused_actors(session);
 }
 
@@ -889,6 +1024,62 @@ mod tests {
                 Heal(300, 0, 200, FLAG_HOT, 18_730_000),
             ]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_folds_unlinked_spirit_rows_into_the_only_spiritmaster() {
+        let dir = temp_dir("spirit-fold");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = sample(1_700_000_000_000, "AsianVaressa");
+        session.duration_ms = 10_000;
+        session.actors = vec!["Xia".into(), "Unknown".into(), "Unknown".into()];
+        session.players = vec![
+            Player {
+                name: "Xia".into(),
+                total: 100,
+                dps: 10,
+                share: 14.3,
+                crit_pct: 0.0,
+                heal: 0,
+                hps: 0,
+                stagger: 0.0,
+            },
+            Player {
+                name: "Unknown".into(),
+                total: 400,
+                dps: 40,
+                share: 57.1,
+                crit_pct: 0.0,
+                heal: 0,
+                hps: 0,
+                stagger: 0.0,
+            },
+            Player {
+                name: "Unknown".into(),
+                total: 200,
+                dps: 20,
+                share: 28.6,
+                crit_pct: 0.0,
+                heal: 0,
+                hps: 0,
+                stagger: 0.0,
+            },
+        ];
+        session.events = vec![
+            Event(0, 0, 100, 0, 16_120_000),
+            Event(100, 1, 400, 0, 16_130_001),
+            Event(200, 2, 200, 0, 100_045),
+        ];
+        session.heals.clear();
+        session.totals.total_damage = 700;
+        session.totals.total_heal = 0;
+        let id = "20231114-221320-asianvaressa";
+        std::fs::write(dir.join(format!("{id}.json")), serde_json::to_string(&session).unwrap()).unwrap();
+        let loaded = load(&dir, id).unwrap();
+        assert_eq!(loaded.actors, ["Xia"]);
+        assert_eq!(loaded.players[0].total, 700);
+        assert_eq!(loaded.events.iter().map(|e| e.1).collect::<Vec<_>>(), [0, 0, 0]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
