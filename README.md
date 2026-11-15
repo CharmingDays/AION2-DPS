@@ -4,7 +4,29 @@ A passive, listen-only DPS meter for AION 2 with a compact overlay, a detailed m
 
 > Unofficial fan project. Not affiliated with, endorsed by or sponsored by NCSOFT. AION is a trademark of NCSOFT Corporation.
 
-<!-- Screenshots: none yet. Add real captures to docs/ and link them here. -->
+## Screenshots
+
+Design previews of the main windows. The shipped app may differ in small details; the Alerts window now also has a Region control in the header.
+
+**Compact overlay** during a fight, after the fight ends, and with an update available:
+
+<p>
+<img src="docs/images/overlay-live.png" alt="Compact overlay during a fight, showing group damage and a player list" width="400">
+<img src="docs/images/overlay-idle.png" alt="Compact overlay after the fight ends, with a reset countdown" width="400">
+<img src="docs/images/overlay-update.png" alt="Compact overlay with a one-line update banner" width="400">
+</p>
+
+**Detailed meter** with the players table and damage by skill:
+
+<img src="docs/images/detailed-meter.png" alt="Detailed meter showing the players table and damage by skill" width="900">
+
+**Config**, on the General and Alerts & Notifications sections:
+
+<p>
+<img src="docs/images/config-general.png" alt="Config window, General section" width="720">
+<img src="docs/images/config-alerts.png" alt="Config window, Alerts and Notifications section" width="720">
+</p>
+
 
 ## Features
 
@@ -234,6 +256,7 @@ ui/               frontend, plain HTML/CSS/JS with no build step
   css/theme.css   design tokens; Inter is bundled in ui/fonts (no CDN)
   js/bridge.js    data source: Tauri events in the app, /api/live polling in a browser
 data/             English skill names and English monster names (npc-names-en.json)
+docs/images/      screenshots of the overlay, detailed meter and Config
 docs/design/      reference renders of the UI design
 docs/third-party.md  source and license of bundled third-party data
 tests/            page and no-memory-access checks
@@ -243,5 +266,5 @@ tests/            page and no-memory-access checks
 
 ### Design
 
-Reference renders of the overlay are in `docs/design/figma-overlay.png` (live) and `docs/design/figma-overlay-idle.png` (fight ended). Colors, radii and spacing are the tokens in `ui/css/theme.css`. The overlay is designed at 360 px wide and the detailed meter at 1440 x 900.
+See [Screenshots](#screenshots) for previews of the overlay, detailed meter and Config windows (`docs/images/`). Colors, radii and spacing are the tokens in `ui/css/theme.css`. The overlay is designed at 360 px wide and the detailed meter at 1440 x 900.
 
