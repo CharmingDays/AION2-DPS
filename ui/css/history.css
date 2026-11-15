@@ -204,7 +204,12 @@ tr.open .caret { transform: rotate(90deg) translateX(2px); }
 .tabs button { padding: 2px 0 4px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
 .tabs button:hover { color: var(--text); }
 .tabs button.on { border-bottom-color: var(--accent); color: var(--text); }
-.share-controls { display: flex; align-items: center; gap: var(--s-2); margin-left: auto; }
+.share-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-2); margin-left: auto; }
+#share-type button[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+.share-table .tag.kind { margin-left: 6px; padding: 1px 5px; border-radius: 3px; background: var(--surface); color: var(--muted); font-size: 9px; font-weight: 700; font-style: normal; }
+.share-table .heal-amt { color: var(--heal); font-variant-numeric: tabular-nums; }
+.share-table col.c-opt { width: auto; }
+
 .share-controls[hidden], #share-view[hidden], #players-view[hidden], .roster-hint[hidden], .share-table[hidden] { display: none; }
 .modes.small button { padding: 3px var(--s-2h); font-size: 12px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .share-table tbody tr.top td { background: var(--accent-hl); }

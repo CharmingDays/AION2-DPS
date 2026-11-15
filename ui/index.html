@@ -136,9 +136,14 @@
     <div class="card-head">
       <h2 id="detail-title">Damage by skill</h2>
       <span class="sub" id="skills-player">Select a player</span>
-      <div class="modes small view-toggle" id="detail-view" role="tablist" aria-label="Detail">
-        <button type="button" role="tab" data-view="damage" class="on">Damage</button>
-        <button type="button" role="tab" data-view="heal" class="heal">Healing</button>
+      <div class="modes small" id="skill-type" role="group" aria-label="Ability type">
+        <button type="button" data-type="all">All</button>
+        <button type="button" data-type="damage" class="on">Damage</button>
+        <button type="button" data-type="heals">Heals</button>
+        <button type="button" data-type="stagger">Stagger</button>
+        <button type="button" data-type="buffs" aria-disabled="true" title="The meter does not record buff casts or applications. The skill table has only English names, not categories.">Buffs</button>
+        <button type="button" data-type="debuffs" aria-disabled="true" title="The meter does not record debuff casts or applications. The skill table has only English names, not categories.">Debuffs</button>
+        <button type="button" data-type="shields" aria-disabled="true" title="Shields and absorbs are not counted. A hit into a shield records only the damage that got through, and shield-apply packets are not parsed.">Shields</button>
       </div>
     </div>
     <div class="tiles" id="tiles">
@@ -237,6 +242,7 @@
 <script src="js/updates.js"></script>
 <script src="js/config-schema.js"></script>
 <script src="js/config-panel.js"></script>
+<script src="js/ability-share.js"></script>
 <script src="js/heal-share.js"></script>
 <script src="js/npcap-help.js"></script>
 <script src="js/stagger-view.js"></script>

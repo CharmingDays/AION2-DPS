@@ -49,6 +49,12 @@
   /** Which Select player list is open: 'share', 'feed' or null. */
   let pickFor = null;
   let shareSort = 'damage';
+  /** Ability type filter on the Ability share tab: all, damage, heals, stagger. */
+  let shareType = 'all';
+  /** Last type chosen per session id, restored when that session is opened again. */
+  const shareTypeBySession = new Map();
+  const SHARE_SORT_LABELS = { damage: 'Damage', hits: 'Hits', crit: 'Crit %', heal: 'Healing', stagger: 'Stagger' };
+
   /** Event count and options the share table last showed. */
   let shareShown = '';
   /** Whether the "Other (N)" row is open to list the abilities inside it. */
@@ -191,6 +197,13 @@
     $('filter-heals').dataset.off = hasHeals ? '' : '1';
     layoutFeedBar();
     hasStagger = sh.has(session);
+    shareType = (id && shareTypeBySession.get(id)) || 'all';
+    if (!abilityShare.typeInfo(shareType).available) shareType = 'all';
+    if (!abilityShare.sortsFor(shareType, { hasHeals, hasStagger }).includes(shareSort)) {
+      shareSort = abilityShare.defaultSort(shareType);
+    }
+    paintShareType();
+    paintShareSort();
     $('players-table').classList.toggle('has-stagger', hasStagger);
     $('players-cols').innerHTML = `${COLS}${hasStagger ? '<col class="c-stag">' : ''}<col class="c-share">`;
     $('s-stagger-stat').hidden = !hasStagger;
@@ -528,58 +541,196 @@
     b.classList.toggle('picked', name != null);
   }
 
+  const shareOpts = () => ({ hasHeals, hasStagger });
+
+  function paintShareType() {
+    document.querySelectorAll('#share-type [data-type]').forEach((b) => {
+      const info = abilityShare.typeInfo(b.dataset.type);
+      b.classList.toggle('on', b.dataset.type === shareType);
+      if (!info.available) {
+        b.setAttribute('aria-disabled', 'true');
+        b.title = info.reason;
+        return;
+      }
+      b.removeAttribute('aria-disabled');
+      if (b.dataset.type === 'heals' && session && !hasHeals) {
+        b.title = 'This session has no healing. Files saved before heal tracking only contain damage.';
+      } else if (b.dataset.type === 'stagger' && session && !hasStagger) {
+        b.title = 'This session has no stagger data. Files saved before stagger tracking omit it, and some fights never build a gauge.';
+      } else if (b.dataset.type === 'stagger') {
+        b.title = "Estimated stagger points from this ability. The game sends only the target's stagger gauge, not a CC-cast log.";
+      } else {
+        b.removeAttribute('title');
+      }
+    });
+  }
+
+  function paintShareSort() {
+    const sorts = abilityShare.sortsFor(shareType, shareOpts());
+    if (!sorts.includes(shareSort)) shareSort = abilityShare.defaultSort(shareType);
+    const bar = $('share-sort');
+    bar.innerHTML = sorts.map((id) => `<button type="button" data-sort="${id}" class="${id === shareSort ? 'on' : ''}">${SHARE_SORT_LABELS[id] || id}</button>`).join('');
+  }
+
+  function setShareType(type) {
+    const info = abilityShare.typeInfo(type);
+    if (!info.available) return;
+    shareType = type;
+    if (loadedId) shareTypeBySession.set(loadedId, type);
+    const sorts = abilityShare.sortsFor(type, shareOpts());
+    if (!sorts.includes(shareSort)) shareSort = abilityShare.defaultSort(type);
+    paintShareType();
+    paintShareSort();
+    if (session) renderShare(true);
+  }
+
+  function shareEmptyCopy(type) {
+    if (type === 'heals') {
+      if (!hasHeals) return { title: 'No healing recorded for this session', sub: 'Sessions saved before heal tracking was added only contain damage.' };
+      return { title: 'No healing yet', sub: 'Share updates as the replay plays' };
+    }
+    if (type === 'stagger') {
+      if (!hasStagger) return { title: 'No stagger recorded for this session', sub: 'Sessions saved before stagger tracking omit it, and some fights never build a gauge.' };
+      return { title: 'No stagger yet', sub: 'Stagger points are estimates from the target gauge.' };
+    }
+    if (type === 'all') return { title: 'No abilities yet', sub: 'Share updates as the replay plays' };
+    return { title: 'No damage yet', sub: 'Share updates as the replay plays' };
+  }
+
+  /** Amount the share % and bar use for this type (and All's current sort). */
+  function shareValue(r, type, sort) {
+    if (type === 'heals') return r.heal;
+    if (type === 'stagger') return r.stagger;
+    if (type === 'all') {
+      if (sort === 'heal') return r.heal;
+      if (sort === 'stagger') return r.stagger;
+      if (sort === 'hits') return abilityShare.hitCount(r, 'all');
+    }
+    return r.damage;
+  }
+
+  function shareParts(r, type, sort) {
+    if (type === 'heals' || (type === 'all' && sort === 'heal')) return r.byHeal;
+    if (type === 'stagger' || (type === 'all' && sort === 'stagger')) return r.byStagger;
+    if (type === 'all' && sort === 'hits') return null;
+    return r.by;
+  }
+
+  function layoutShareHead(type) {
+    const showHeal = type === 'heals' || type === 'all';
+    const showStagger = type === 'stagger' || (type === 'all' && hasStagger);
+    const showCrit = type === 'damage';
+    const showDamage = type === 'damage' || type === 'all';
+    const cols = ['<col class="c-rank">', '<col>'];
+    const heads = ['#', 'ABILITY'];
+    if (showDamage) { cols.push('<col class="c-num">'); heads.push('DAMAGE'); }
+    if (showHeal) { cols.push('<col class="c-num">'); heads.push('HEALING'); }
+    if (showStagger) { cols.push('<col class="c-num">'); heads.push('STAGGER ~'); }
+    cols.push('<col class="c-pct">'); heads.push('HITS');
+    if (showCrit) { cols.push('<col class="c-pct">'); heads.push('CRIT %'); }
+    cols.push('<col class="c-pct">', '<col class="c-share">');
+    heads.push('% OF TOTAL', 'SHARE');
+    $('share-cols').innerHTML = cols.join('');
+    $('share-head').innerHTML = heads.map((h) => (h === 'STAGGER ~'
+      ? '<th title="Estimated stagger points">STAGGER ~</th>'
+      : `<th>${h}</th>`)).join('');
+    return heads.length;
+  }
+
   /**
-   * Abilities and their part of the damage up to the playhead, for all
-   * players or the selected one, from the same running totals as the
-   * players table. Redrawn only when the hits or options change.
+   * Abilities up to the playhead, for all players or the selected one, filtered
+   * by type (damage, heals, stagger, or all recorded kinds). Redrawn only when
+   * the hits or options change.
    */
   function renderShare(force) {
     if (tab !== 'share') return;
     const who = shareScope === 'player' ? selectedActor : null;
-    const key = `${acc.cursor}|${shareScope}|${who}|${shareSort}|${Math.floor(playhead / 1000)}`;
+    const key = `${acc.cursor}|${hacc ? hacc.cursor : 0}|${sacc ? sacc.cursor : 0}|${shareScope}|${who}|${shareType}|${shareSort}|${Math.floor(playhead / 1000)}`;
     if (!force && key === shareShown) return;
     shareShown = key;
     scopeLabel();
+    paintShareType();
     const actors = shareScope === 'player' ? (who == null ? [] : [who]) : acc.skills.map((_, i) => i);
-    const merged = abilityShare.merge(acc.skills, actors, session.skill_names);
-    const total = merged.reduce((t, r) => t + r.damage, 0);
-    $('roster-sub').textContent = `Total damage ${total > 0 ? short(total) : '—'} \u00b7 at ${clock(playhead)}`;
-    const empty = total <= 0;
+    const merged = abilityShare.combine(
+      acc.skills,
+      hasHeals && hacc ? hacc.skills : [],
+      hasStagger && sacc ? sh.skillMaps(sacc) : [],
+      actors,
+      session.skill_names,
+    );
+    const type = shareType;
+    const { shown, rest } = abilityShare.split(merged, shareSort, abilityShare.SHARE_ROWS, type);
+    const listed = shown.concat(rest);
+    const valueOf = (r) => shareValue(r, type, shareSort);
+    const total = listed.reduce((sum, r) => sum + valueOf(r), 0);
+    const cols = layoutShareHead(type);
+    const showHeal = type === 'heals' || type === 'all';
+    const showStagger = type === 'stagger' || (type === 'all' && hasStagger);
+    const showCrit = type === 'damage';
+    const showDamage = type === 'damage' || type === 'all';
+    const empty = listed.length === 0 || !(total > 0) && !(type === 'all' && listed.length);
+    const copy = shareEmptyCopy(type);
+    const amountLabel = type === 'heals' ? 'healing' : type === 'stagger' ? 'stagger' : type === 'all' && shareSort === 'heal' ? 'healing' : type === 'all' && shareSort === 'stagger' ? 'stagger' : type === 'all' && shareSort === 'hits' ? 'uses' : 'damage';
+    $('roster-sub').textContent = listed.length
+      ? `Total ${amountLabel} ${type === 'stagger' || (type === 'all' && shareSort === 'stagger') ? (sh.points(total, full) || '—') : total > 0 ? short(total) : '—'} \u00b7 at ${clock(playhead)}`
+      : `at ${clock(playhead)}`;
     $('share-empty').hidden = !empty;
+    $('share-empty').innerHTML = `<strong>${esc(copy.title)}</strong><span>${esc(copy.sub)}</span>`;
     $('share-rows').closest('table').hidden = empty;
     if (empty) { $('share-rows').innerHTML = ''; return; }
-    const { shown, rest } = abilityShare.split(merged, shareSort);
-    const pctOf = (d) => Math.round((d / total) * 1000) / 10;
+    const pctOf = (v) => (total > 0 ? Math.round((v / total) * 1000) / 10 : 0);
     const line = (r, rank, cls) => {
       const name = r.name || skillName(r.skill);
-      const allDot = r.dotDamage > 0 && r.dotDamage >= r.damage;
-      const tag = allDot ? ' <em>(DoT)</em>' : r.dotDamage > 0 ? ' <em class="incl-dot">incl. DoT</em>' : '';
-      const tip = [r.dotDamage > 0 && !allDot ? `DoT ${short(r.dotDamage)} of ${short(r.damage)}` : '', r.variants > 1 ? `${r.variants} skill ids` : ''].filter(Boolean).join('\n');
-      return `<tr class="${cls}">
-        <td class="rank">${rank}</td>
-        <td><div class="who">${icon(r.skill, name)}<span class="name"${tip ? ` title="${esc(tip)}"` : ''}>${esc(name)}${tag}</span></div></td>
-        <td class="dmg" title="${full(r.damage)}">${short(r.damage)}</td>
-        <td class="dim">${r.hits}</td>
-        <td class="dim">${rate(r.crits, r.hits, 0)}</td>
-        <td class="share-pct">${pctOf(r.damage).toFixed(1)}%</td>
-        <td>${shareBar(r, total)}</td>
-      </tr>`;
+      const tags = [];
+      if (type === 'all') {
+        if (r.damage > 0) tags.push('<em class="tag kind">Dmg</em>');
+        if (r.heal > 0) tags.push(`<em class="tag kind${r.hotHeal > 0 && r.hotHeal >= r.heal ? ' hot' : ''}">${r.hotHeal > 0 && r.hotHeal >= r.heal ? 'HoT' : 'Heal'}</em>`);
+        if (r.stagger > 0) tags.push('<em class="tag kind">Stagger</em>');
+      } else if (type === 'damage') {
+        const allDot = r.dotDamage > 0 && r.dotDamage >= r.damage;
+        if (allDot) tags.push('<em>(DoT)</em>');
+        else if (r.dotDamage > 0) tags.push('<em class="incl-dot">incl. DoT</em>');
+      } else if (type === 'heals' && r.hotHeal > 0 && r.hotHeal >= r.heal) {
+        tags.push('<span class="tag hot">HoT</span>');
+      }
+      const tip = [r.dotDamage > 0 && r.dotDamage < r.damage ? `DoT ${short(r.dotDamage)} of ${short(r.damage)}` : '', r.variants > 1 ? `${r.variants} skill ids` : ''].filter(Boolean).join('\n');
+      const hits = abilityShare.hitCount(r, type);
+      const val = valueOf(r);
+      const cells = [`<td class="rank">${rank}</td>`,
+        `<td><div class="who">${icon(r.skill, name)}<span class="name"${tip ? ` title="${esc(tip)}"` : ''}>${esc(name)}${tags.join('')}</span></div></td>`];
+      if (showDamage) cells.push(`<td class="dmg" title="${r.damage ? full(r.damage) : ''}">${r.damage ? short(r.damage) : '—'}</td>`);
+      if (showHeal) cells.push(`<td class="heal-amt" title="${r.heal ? full(r.heal) : ''}">${r.heal ? short(r.heal) : '—'}</td>`);
+      if (showStagger) cells.push(`<td class="dmg stag-pts" title="Estimated stagger points">${r.stagger > 0 ? sh.points(r.stagger, full) : '—'}</td>`);
+      cells.push(`<td class="dim">${hits || '—'}</td>`);
+      if (showCrit) cells.push(`<td class="dim">${rate(r.crits, r.hits, 0)}</td>`);
+      cells.push(`<td class="share-pct">${pctOf(val).toFixed(1)}%</td>`);
+      const parts = shareParts(r, type, shareSort);
+      cells.push(`<td>${parts ? shareBar(r, total, parts, val, type === 'stagger' || (type === 'all' && shareSort === 'stagger')) : `<span class="share faint"><i style="width:${pctOf(val)}%"></i></span>`}</td>`);
+      return `<tr class="${cls}">${cells.join('')}</tr>`;
     };
     const rows = shown.map((r, i) => line(r, i + 1, i === 0 ? 'top' : ''));
     if (rest.length) {
-      const o = rest.reduce((t, r) => ({ damage: t.damage + r.damage, hits: t.hits + r.hits, crits: t.crits + r.crits }), { damage: 0, hits: 0, crits: 0 });
-      rows.push(`<tr class="other${otherOpen ? ' open' : ''}" id="share-other" tabindex="0" role="button" aria-expanded="${otherOpen}" aria-controls="share-other-list" title="${otherOpen ? 'Hide' : 'Show'} the abilities in Other">
-        <td class="rank">${shown.length + 1}</td>
-        <td><div class="who"><span class="ab-icon other-icon">…</span><span class="name">Other (${rest.length})</span><span class="chev" aria-hidden="true"></span></div></td>
-        <td class="dmg" title="${full(o.damage)}">${short(o.damage)}</td>
-        <td class="dim">${o.hits}</td>
-        <td class="dim">${rate(o.crits, o.hits, 0)}</td>
-        <td class="share-pct">${pctOf(o.damage).toFixed(1)}%</td>
-        <td><span class="share faint"><i style="width:${pctOf(o.damage)}%"></i></span></td>
-      </tr>`);
+      const o = rest.reduce((t, r) => ({
+        damage: t.damage + r.damage, heal: t.heal + r.heal, stagger: t.stagger + r.stagger,
+        hits: t.hits + r.hits, healHits: t.healHits + r.healHits, staggerHits: t.staggerHits + r.staggerHits,
+        crits: t.crits + r.crits, by: t.by.concat(r.by || []), byHeal: t.byHeal.concat(r.byHeal || []),
+        byStagger: t.byStagger.concat(r.byStagger || []),
+        hotHeal: t.hotHeal + r.hotHeal, dotDamage: t.dotDamage + r.dotDamage, variants: 0,
+      }), { damage: 0, heal: 0, stagger: 0, hits: 0, healHits: 0, staggerHits: 0, crits: 0, by: [], byHeal: [], byStagger: [], hotHeal: 0, dotDamage: 0, variants: 0 });
+      const oval = valueOf(o);
+      const ocells = [`<td class="rank">${shown.length + 1}</td>`,
+        `<td><div class="who"><span class="ab-icon other-icon">…</span><span class="name">Other (${rest.length})</span><span class="chev" aria-hidden="true"></span></div></td>`];
+      if (showDamage) ocells.push(`<td class="dmg" title="${o.damage ? full(o.damage) : ''}">${o.damage ? short(o.damage) : '—'}</td>`);
+      if (showHeal) ocells.push(`<td class="heal-amt" title="${o.heal ? full(o.heal) : ''}">${o.heal ? short(o.heal) : '—'}</td>`);
+      if (showStagger) ocells.push(`<td class="dmg stag-pts">${o.stagger > 0 ? sh.points(o.stagger, full) : '—'}</td>`);
+      ocells.push(`<td class="dim">${abilityShare.hitCount(o, type) || '—'}</td>`);
+      if (showCrit) ocells.push(`<td class="dim">${rate(o.crits, o.hits, 0)}</td>`);
+      ocells.push(`<td class="share-pct">${pctOf(oval).toFixed(1)}%</td>`);
+      ocells.push(`<td><span class="share faint"><i style="width:${pctOf(oval)}%"></i></span></td>`);
+      rows.push(`<tr class="other${otherOpen ? ' open' : ''}" id="share-other" tabindex="0" role="button" aria-expanded="${otherOpen}" aria-controls="share-other-list" title="${otherOpen ? 'Hide' : 'Show'} the abilities in Other">${ocells.join('')}</tr>`);
       if (otherOpen) {
-        rows.push(`<tr class="other-list" id="share-other-list"><td colspan="7"><div class="other-scroll"><table class="players-table share-table">
-          <colgroup><col class="c-rank"><col><col class="c-num"><col class="c-pct"><col class="c-pct"><col class="c-pct"><col class="c-share"></colgroup>
+        rows.push(`<tr class="other-list" id="share-other-list"><td colspan="${cols}"><div class="other-scroll"><table class="players-table share-table">
+          <colgroup>${$('share-cols').innerHTML}</colgroup>
           <tbody>${rest.map((r, i) => line(r, shown.length + 1 + i, 'sub')).join('')}</tbody></table></div></td></tr>`);
       }
     }
@@ -587,9 +738,11 @@
   }
 
   /** An ability's share bar, split into one segment per player in that player's colour. */
-  function shareBar(r, total) {
-    const segs = playerColors.segments(r.by, (r.damage / total) * 100);
-    const tip = segs.map((s) => `${session.actors[s.actor] || UNKNOWN}: ${short(s.damage)} (${s.pct.toFixed(1)}%)`).join('\n');
+function shareBar(r, total, parts, value, stagger) {
+    const amt = value != null ? value : r.damage;
+    const segs = playerColors.segments(parts || r.by, total > 0 ? (amt / total) * 100 : 0);
+    const fmt = (n) => (stagger ? (sh.points(n, full) || '0') : short(n));
+    const tip = segs.map((s) => `${session.actors[s.actor] || UNKNOWN}: ${fmt(s.damage)} (${s.pct.toFixed(1)}%)`).join('\n');
     return `<span class="share split" title="${esc(tip)}">${segs.map((s) => `<i style="width:${Math.round(s.width * 100) / 100}%;--pc:${pc(s.actor)}"></i>`).join('')}</span>`;
   }
 
@@ -1090,11 +1243,18 @@
   document.addEventListener('mousedown', (event) => {
     if (!event.target.closest('.pick-list, #scope-player, #filter-player, #heal-scope-player, #feed-more')) closePicker(false);
   });
-  document.querySelectorAll('#share-sort button').forEach((b) => b.addEventListener('click', () => {
+  $('share-type').addEventListener('click', (event) => {
+    const b = event.target.closest('[data-type]');
+    if (!b || b.getAttribute('aria-disabled') === 'true') return;
+    setShareType(b.dataset.type);
+  });
+  $('share-sort').addEventListener('click', (event) => {
+    const b = event.target.closest('[data-sort]');
+    if (!b) return;
     shareSort = b.dataset.sort;
-    document.querySelectorAll('#share-sort button').forEach((other) => other.classList.toggle('on', other === b));
+    paintShareSort();
     if (session) renderShare(true);
-  }));
+  });
   document.querySelectorAll('#feed-filters > button:not(#filter-player)').forEach((b) => b.addEventListener('click', () => {
     closePicker(false);
     feedFilter = b.dataset.filter;

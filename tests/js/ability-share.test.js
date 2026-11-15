@@ -1,7 +1,10 @@
 // Run with: node --test tests/js/ability-share.test.js
 const test = require('node:test');
 const assert = require('node:assert');
-const { merge, split, groupKey } = require('../../ui/js/ability-share.js');
+const {
+  merge, split, groupKey, combine, matches, TYPES, typeInfo,
+  sortsFor, defaultSort, fromHeals, fromStagger, hitCount,
+} = require('../../ui/js/ability-share.js');
 
 const names = {
   16330000: 'Dimensional Control',
@@ -10,6 +13,7 @@ const names = {
   100024: 'Water Spirit: Basic Attack',
   16150000: 'Jointstrike: Corrode',
   16151400: 'Fire Spirit: Rage Burst',
+  18730000: 'Protection Circle',
 };
 const row = (skill, dot, damage, hits = 1, crits = 0) => ({ skill, dot, damage, hits, crits });
 const map = (...rows) => new Map(rows.map((r) => [r.skill * 2 + (r.dot ? 1 : 0), r]));
@@ -61,4 +65,74 @@ test('sorting by hits and crit rate, zero-damage rows dropped', () => {
   assert.strictEqual(split(rows, 'hits').shown[0].damage, 20);
   assert.strictEqual(split(rows, 'crit').shown[0].damage, 10);
   assert.strictEqual(split(rows, 'damage').shown.length, 2);
+});
+
+test('buffs, debuffs and shields are unavailable', () => {
+  for (const id of ['buffs', 'debuffs', 'shields']) {
+    const t = typeInfo(id);
+    assert.strictEqual(t.available, false);
+    assert.ok(t.reason && t.reason.length > 20);
+  }
+  assert.strictEqual(typeInfo('heals').available, true);
+  assert.deepStrictEqual(TYPES.filter((t) => t.available).map((t) => t.id), ['all', 'damage', 'heals', 'stagger']);
+});
+
+test('combine folds damage, heals and stagger of one skill, and filters by type', () => {
+  const dmg = [map(row(16330000, false, 70, 3, 1))];
+  const heals = [map({ skill: 18730000, dot: true, damage: 40, hits: 8, crits: 0 })];
+  const stag = [map({ skill: 16330000, damage: 12, hits: 2 })];
+  const rows = combine(dmg, heals, stag, [0], names);
+  const control = rows.find((r) => r.skill === 16330000);
+  const circle = rows.find((r) => r.skill === 18730000);
+  assert.strictEqual(control.damage, 70);
+  assert.strictEqual(control.stagger, 12);
+  assert.strictEqual(control.staggerHits, 2);
+  assert.strictEqual(control.heal, 0);
+  assert.strictEqual(circle.heal, 40);
+  assert.strictEqual(circle.healHits, 8);
+  assert.strictEqual(circle.hotHeal, 40);
+  assert.strictEqual(circle.damage, 0);
+  assert.strictEqual(split(rows, 'damage', 12, 'damage').shown.length, 1);
+  assert.strictEqual(split(rows, 'heal', 12, 'heals').shown[0].skill, 18730000);
+  assert.strictEqual(split(rows, 'stagger', 12, 'stagger').shown[0].stagger, 12);
+  assert.strictEqual(split(rows, 'damage', 12, 'all').shown.length, 2);
+  assert.strictEqual(split(rows, 'hits', 12, 'heals').shown[0].healHits, 8);
+});
+
+test('fromHeals and fromStagger ignore the borrowed damage field after conversion', () => {
+  const heals = fromHeals([map({ skill: 18730000, dot: true, damage: 15, hits: 3 })]);
+  const converted = [...heals[0].values()][0];
+  assert.strictEqual(converted.heal, 15);
+  assert.strictEqual(converted.damage, 0);
+  const stag = fromStagger([map({ skill: 16330000, damage: 9, hits: 1 })]);
+  const s = [...stag[0].values()][0];
+  assert.strictEqual(s.stagger, 9);
+  assert.strictEqual(s.damage, 0);
+});
+
+test('sortsFor hides unused All sorts and defaultSort follows the type', () => {
+  assert.deepStrictEqual(sortsFor('damage'), ['damage', 'hits', 'crit']);
+  assert.deepStrictEqual(sortsFor('heals'), ['heal', 'hits']);
+  assert.deepStrictEqual(sortsFor('stagger'), ['stagger', 'hits']);
+  assert.deepStrictEqual(sortsFor('all', { hasHeals: true, hasStagger: false }), ['damage', 'heal', 'hits']);
+  assert.deepStrictEqual(sortsFor('all', { hasHeals: false, hasStagger: false }), ['damage', 'hits']);
+  assert.strictEqual(defaultSort('heals'), 'heal');
+  assert.strictEqual(defaultSort('stagger'), 'stagger');
+  assert.strictEqual(defaultSort('all'), 'damage');
+});
+
+test('heal-only rows are kept in All and dropped in Damage', () => {
+  const rows = [{ damage: 0, heal: 50, healHits: 2, stagger: 0, hits: 0, crits: 0 }];
+  assert.strictEqual(matches(rows[0], 'all'), true);
+  assert.strictEqual(matches(rows[0], 'damage'), false);
+  assert.strictEqual(matches(rows[0], 'heals'), true);
+  assert.strictEqual(split(rows, 'heal', 12, 'all').shown.length, 1);
+  assert.strictEqual(split(rows, 'damage', 12, 'damage').shown.length, 0);
+  assert.strictEqual(hitCount(rows[0], 'heals'), 2);
+});
+
+test('unavailable types match no rows', () => {
+  const rows = [{ damage: 10, heal: 5, stagger: 1, hits: 1, crits: 0 }];
+  assert.strictEqual(split(rows, 'damage', 12, 'buffs').shown.length, 0);
+  assert.strictEqual(split(rows, 'damage', 12, 'shields').shown.length, 0);
 });

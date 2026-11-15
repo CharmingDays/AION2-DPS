@@ -6,6 +6,10 @@
   const RECENT_ROWS = 40;
   const VIEW_KEY = 'aion2dps.meter.view';
   const heals = window.healShare;
+  const abilityShare = window.abilityShare;
+  /** Skill-panel type filter; independent of the players-table Damage/Heal view. */
+  let skillType = 'damage';
+
   const DAMAGE_HEADINGS = ['RANK', 'NAME', 'TOTAL DAMAGE', 'DPS', '% OF GROUP', 'CRIT %', 'SHARE'];
   const HEAL_HEADINGS = ['#', 'NAME', 'TOTAL HEAL', 'HPS', '% OF GROUP', '', 'SHARE'];
   const COLS = '<col class="c-rank"><col><col class="c-num"><col class="c-num"><col class="c-pct"><col class="c-pct">';
@@ -182,6 +186,114 @@
       : '<li class="empty">No healing recorded yet</li>';
   }
 
+  function paintSkillType() {
+    document.querySelectorAll('#skill-type [data-type]').forEach((b) => {
+      const info = abilityShare.typeInfo(b.dataset.type);
+      b.classList.toggle('on', b.dataset.type === skillType);
+      if (!info.available) {
+        b.setAttribute('aria-disabled', 'true');
+        if (info.reason) b.title = info.reason;
+      } else if (b.dataset.type === 'stagger') {
+        b.title = "Estimated stagger points from this ability. The game sends only the target's stagger gauge, not a CC-cast log.";
+      }
+    });
+  }
+
+  function skillMapsFor(player, healer) {
+    const names = {};
+    const dmg = new Map();
+    for (const s of (player && player.skills) || []) {
+      names[s.id] = s.name;
+      dmg.set(s.id * 2 + (s.dot ? 1 : 0), {
+        skill: s.id, dot: !!s.dot, damage: s.damage, hits: s.hits, crits: s.crits,
+        stagger: s.stagger || 0, staggerHits: s.stagger > 0 ? s.hits : 0,
+      });
+    }
+    const healsMap = new Map();
+    for (const s of (healer && healer.skills) || []) {
+      names[s.id] = s.name;
+      healsMap.set(s.id * 2 + (s.hot ? 1 : 0), {
+        skill: s.id, heal: s.heal, healHits: s.ticks, hot: !!s.hot,
+      });
+    }
+    return { names, dmg, healsMap };
+  }
+
+  function renderSkillPanel(m, player, healer) {
+    paintSkillType();
+    const type = skillType;
+    const titles = { all: 'Abilities', damage: 'Damage by skill', heals: 'Healing by skill', stagger: 'Stagger by skill' };
+    $('detail-title').textContent = titles[type] || 'Abilities';
+    const showHeal = type === 'heals';
+    ['tiles', 'extras', 'skills'].forEach((id) => { $(id).hidden = showHeal; });
+    ['heal-tiles', 'heal-detail'].forEach((id) => { $(id).hidden = !showHeal; });
+    if (showHeal) {
+      renderHealDetail(m, healer, player && player.name);
+      return;
+    }
+    if (type === 'damage') {
+      renderSkills(player);
+      return;
+    }
+    const who = $('skills-player');
+    const subject = player || healer;
+    if (!subject) {
+      who.textContent = 'Select a player';
+      who.className = 'sub';
+      ['t-damage', 't-hits', 't-crit', 't-back'].forEach((id) => { $(id).textContent = '—'; });
+      $('extras').innerHTML = '';
+      $('skills').innerHTML = '<div class="empty">Select a player in the table.</div>';
+      return;
+    }
+    if (player) renderSkills(player);
+    else {
+      who.textContent = subject.name;
+      who.className = `sub ${nameClass(subject.name, subject.you)}`;
+      ['t-damage', 't-hits', 't-crit', 't-back'].forEach((id) => { $(id).textContent = '—'; });
+      $('extras').innerHTML = '';
+    }
+    const { names, dmg, healsMap } = skillMapsFor(player, healer);
+    const rows = abilityShare.combine([dmg], [healsMap], [], [0], names);
+    const sort = type === 'stagger' ? 'stagger' : 'damage';
+    const { shown, rest } = abilityShare.split(rows, sort, 99, type);
+    const all = shown.concat(rest);
+    if (!all.length) {
+      const empty = type === 'stagger'
+        ? 'No stagger attributed to this player\'s skills.'
+        : 'No skills recorded.';
+      $('skills').innerHTML = `<div class="empty">${empty}</div>`;
+      return;
+    }
+    const valueOf = (r) => (type === 'stagger' ? r.stagger : (r.damage || r.heal || r.stagger));
+    const top = Math.max(1, ...all.map(valueOf));
+    const denom = type === 'stagger'
+      ? (player && player.stagger) || all.reduce((s, r) => s + r.stagger, 0)
+      : all.reduce((s, r) => s + (r.damage || (type === 'all' ? r.heal : 0)), 0);
+    $('skills').innerHTML = all.map((s) => {
+      const val = valueOf(s);
+      const amount = type === 'stagger' ? (sv.points(s.stagger, full) || '—')
+        : s.damage ? short(s.damage) : s.heal ? short(s.heal) : sv.points(s.stagger, full);
+      const tags = [];
+      if (s.dotDamage > 0 && s.damage && s.dotDamage >= s.damage) tags.push('<span class="tag">DoT</span>');
+      if (s.heal > 0) tags.push(`<span class="tag ${s.hotHeal > 0 && s.hotHeal >= s.heal ? 'hot' : 'heal-tag'}">${s.hotHeal > 0 && s.hotHeal >= s.heal ? 'HoT' : 'Heal'}</span>`);
+      if (s.stagger > 0 && type === 'all') tags.push('<span class="tag">Stagger</span>');
+      const pctVal = denom > 0 ? (type === 'stagger' ? s.stagger / denom : (s.damage || s.heal) / denom) : 0;
+      const meta = type === 'stagger'
+        ? 'Estimated stagger points'
+        : `${full(s.hits)} hits${s.hits ? ` \u00b7 crit ${rate(s.crits, s.hits)}` : ''}${s.heal ? ` \u00b7 heal ${short(s.heal)}` : ''}${s.stagger > 0 ? ` \u00b7 <span class="stag-meta" title="Estimated stagger points">stagger ${sv.points(s.stagger, full)}</span>` : ''}`;
+      return `
+      <div class="skill${s.heal && !s.damage ? ' heal-skill' : ''}" title="Skill ${s.skill}">
+        <div class="skill-top">
+          <span class="skill-name">${esc(s.name || ('Skill ' + s.skill))}${tags.join('')}</span>
+          <span class="skill-dmg">${amount}</span>
+          <span class="skill-pct">${pctVal > 0 ? pct(pctVal, type === 'all' ? 1 : 1) : '—'}</span>
+        </div>
+        <div class="skill-bar${s.heal && !s.damage ? ' heal-bar' : ''}"><i style="width:${Math.round((val / top) * 1000) / 10}%"></i></div>
+        <div class="skill-meta">${meta}</div>
+      </div>`;
+    }).join('');
+  }
+
   function renderSkills(player) {
     const list = $('skills');
     const who = $('skills-player');
@@ -300,7 +412,7 @@
       const you = healers.find((h) => h.you);
       selected = (you || heals.healerRows(healers)[0]).id;
     }
-    document.querySelectorAll('#view button, #detail-view button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
+    document.querySelectorAll('#view button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
     const stagger = sv.has(m.stagger) ? m.stagger : null;
     const stagCol = !!stagger && !healing;
     const headings = (healing ? HEAL_HEADINGS : DAMAGE_HEADINGS).map((h) => `<th>${h}</th>`);
@@ -309,14 +421,11 @@
     $('players-cols').innerHTML = `${COLS}${stagCol ? '<col class="c-stag">' : ''}<col class="c-share">`;
     $('players-table').classList.toggle('has-stagger', stagCol);
     renderStagger(stagger);
-    $('detail-title').textContent = healing ? 'Healing' : 'Damage by skill';
-    ['tiles', 'extras', 'skills'].forEach((id) => { $(id).hidden = healing; });
-    ['heal-tiles', 'heal-detail'].forEach((id) => { $(id).hidden = !healing; });
     if (healing) renderHealers(m);
     else renderPlayers(m, stagger);
     const player = m.players.find((p) => p.id === selected);
-    if (healing) renderHealDetail(m, healers.find((h) => h.id === selected), player && player.name);
-    else renderSkills(player);
+    const healer = healers.find((h) => h.id === selected);
+    renderSkillPanel(m, player, healer);
     renderRecent(m);
     renderHistory(data.history || []);
     renderCapture(data.capture);
@@ -352,11 +461,17 @@
     selected = Number(row.dataset.id);
     if (latest) render(latest);
   });
-  document.querySelectorAll('#view button, #detail-view button').forEach((b) => b.addEventListener('click', () => {
+  document.querySelectorAll('#view button').forEach((b) => b.addEventListener('click', () => {
     view = heals.view(b.dataset.view);
     localStorage.setItem(VIEW_KEY, view);
     if (latest) render(latest);
   }));
+  $('skill-type').addEventListener('click', (event) => {
+    const b = event.target.closest('[data-type]');
+    if (!b || b.getAttribute('aria-disabled') === 'true') return;
+    skillType = b.dataset.type;
+    if (latest) render(latest);
+  });
   document.querySelectorAll('#modes button').forEach((b) => b.addEventListener('click', () => {
     bridge.setMode(b.dataset.mode).catch(lost);
   }));

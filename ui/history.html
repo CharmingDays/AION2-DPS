@@ -115,6 +115,16 @@
             <button type="button" data-scope="player" id="scope-player" aria-haspopup="listbox" aria-expanded="false" aria-controls="player-pick">Select player</button>
             <ul class="pick-list" id="player-pick" role="listbox" aria-label="Players" hidden></ul>
           </div>
+          <span class="pb-label">Type</span>
+          <div class="modes small" id="share-type" role="group" aria-label="Ability type">
+            <button type="button" data-type="all" class="on">All</button>
+            <button type="button" data-type="damage">Damage</button>
+            <button type="button" data-type="heals">Heals</button>
+            <button type="button" data-type="stagger">Stagger</button>
+            <button type="button" data-type="buffs" aria-disabled="true" title="The meter does not record buff casts or applications. The skill table has only English names, not categories.">Buffs</button>
+            <button type="button" data-type="debuffs" aria-disabled="true" title="The meter does not record debuff casts or applications. The skill table has only English names, not categories.">Debuffs</button>
+            <button type="button" data-type="shields" aria-disabled="true" title="Shields and absorbs are not counted. A hit into a shield records only the damage that got through, and shield-apply packets are not parsed.">Shields</button>
+          </div>
           <span class="pb-label">Sort</span>
           <div class="modes small" id="share-sort" role="group" aria-label="Sort by">
             <button type="button" data-sort="damage" class="on">Damage</button>
@@ -174,11 +184,11 @@
       </div>
       <div class="scroll" id="share-view" hidden>
         <table class="players-table share-table">
-          <colgroup>
+          <colgroup id="share-cols">
             <col class="c-rank"><col><col class="c-num"><col class="c-pct"><col class="c-pct"><col class="c-pct"><col class="c-share">
           </colgroup>
           <thead>
-            <tr><th>#</th><th>ABILITY</th><th>DAMAGE</th><th>HITS</th><th>CRIT %</th><th>% OF TOTAL</th><th>SHARE</th></tr>
+            <tr id="share-head"><th>#</th><th>ABILITY</th><th>DAMAGE</th><th>HITS</th><th>CRIT %</th><th>% OF TOTAL</th><th>SHARE</th></tr>
           </thead>
           <tbody id="share-rows"></tbody>
         </table>

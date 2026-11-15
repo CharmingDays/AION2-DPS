@@ -255,6 +255,9 @@ th:first-child, td:first-child { text-align: left; }
 .tag.heal-tag { margin: 0; }
 .modes button.heal.on { background: var(--heal-hl); color: var(--heal); }
 .view-toggle { margin-left: auto; align-self: center; }
+.skills .card-head { flex-wrap: wrap; align-items: center; }
+#skill-type { flex: 1 1 100%; margin: 0; }
+#skill-type button[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
 .heal-text { color: var(--heal); }
 .skills [hidden] { display: none !important; }
 .heal-share > i, .heal-bar > i { background: var(--heal); }
