@@ -127,6 +127,8 @@ pub struct AppState {
     overlay_click_through: AtomicBool,
     /// Config: check GitHub shortly after start and every hour. Default on.
     check_updates_automatically: AtomicBool,
+    /// Config: event notification toasts only while AION 2 is running. Default off.
+    toasts_only_when_aion2: AtomicBool,
     /// Last version we emitted `update-available` for (saved; no repeat notify).
     update_last_notified: Mutex<Option<String>>,
     /// Version the user skipped in the update dialog (saved).
@@ -226,6 +228,7 @@ impl AppState {
             pop_up_on_boss: AtomicBool::new(stored.pop_up_on_boss),
             overlay_click_through: AtomicBool::new(stored.overlay_click_through),
             check_updates_automatically: AtomicBool::new(stored.check_updates_automatically),
+            toasts_only_when_aion2: AtomicBool::new(stored.toasts_only_when_aion2),
             update_last_notified: Mutex::new(stored.update_last_notified.clone()),
             update_skipped: Mutex::new(stored.update_skipped.clone()),
             update_dismissed: Mutex::new(stored.update_dismissed.clone()),
@@ -390,6 +393,7 @@ impl AppState {
         settings.debug_cubes = self.debug_cubes.load(Ordering::Relaxed);
         settings.debug_env = self.debug_env;
         settings.check_updates_automatically = self.check_updates_automatically();
+        settings.toasts_only_when_aion2 = self.toasts_only_when_aion2();
         Live {
             cube_alerts: self.with_cubes(|cubes| {
                 if self.hidden_cube_alerts() {
@@ -539,6 +543,16 @@ impl AppState {
     /// Persist the automatic GitHub check. Default is on.
     pub fn set_check_updates_automatically(&self, on: bool) {
         self.check_updates_automatically.store(on, Ordering::Relaxed);
+        self.store_settings();
+    }
+
+    pub fn toasts_only_when_aion2(&self) -> bool {
+        self.toasts_only_when_aion2.load(Ordering::Relaxed)
+    }
+
+    /// Persist "only show event toasts while Aion 2 is running". Default is off.
+    pub fn set_toasts_only_when_aion2(&self, on: bool) {
+        self.toasts_only_when_aion2.store(on, Ordering::Relaxed);
         self.store_settings();
     }
 
@@ -714,6 +728,7 @@ impl AppState {
             pop_up_on_boss: self.pop_up_on_boss(),
             overlay_click_through: self.overlay_click_through(),
             check_updates_automatically: self.check_updates_automatically(),
+            toasts_only_when_aion2: self.toasts_only_when_aion2(),
             update_last_notified: self.update_last_notified(),
             update_skipped: Self::lock_opt(&self.update_skipped).clone(),
             update_dismissed: Self::lock_opt(&self.update_dismissed).clone(),
@@ -757,6 +772,8 @@ struct StoredSettings {
     overlay_click_through: bool,
     /// Default on: check GitHub shortly after start and every hour.
     check_updates_automatically: bool,
+    /// Default off: event toasts still show when the game is closed.
+    toasts_only_when_aion2: bool,
     /// Last version announced as available; do not notify about it again.
     update_last_notified: Option<String>,
     /// Version the user chose to skip in the update dialog.
@@ -792,6 +809,7 @@ impl Default for StoredSettings {
             pop_up_on_boss: true,
             overlay_click_through: true,
             check_updates_automatically: true,
+            toasts_only_when_aion2: false,
             update_last_notified: None,
             update_skipped: None,
             update_dismissed: None,
@@ -819,6 +837,7 @@ impl From<SettingsView> for StoredSettings {
             pop_up_on_boss: view.pop_up_on_boss,
             overlay_click_through: view.overlay_click_through,
             check_updates_automatically: view.check_updates_automatically,
+            toasts_only_when_aion2: view.toasts_only_when_aion2,
             update_last_notified: None,
             update_skipped: None,
             update_dismissed: None,
@@ -915,6 +934,7 @@ mod tests {
         assert!(stored.pop_up_on_boss);
         assert!(stored.overlay_click_through);
         assert!(stored.check_updates_automatically);
+        assert!(!stored.toasts_only_when_aion2);
         assert_eq!(stored.update_last_notified, None);
         assert_eq!(stored.update_skipped, None);
         assert_eq!(stored.update_dismissed, None);
@@ -982,6 +1002,20 @@ mod tests {
         assert!(state.open_when_aion2(), "saving the reset delay must keep the tray option");
         state.set_open_when_aion2(false);
         assert!(!state.open_when_aion2());
+    }
+
+    #[test]
+    fn toasts_only_when_aion2_defaults_off_and_survives_other_saves() {
+        let state = AppState::with_storage(None, None);
+        assert!(!state.toasts_only_when_aion2());
+        assert!(!state.live(0).settings.toasts_only_when_aion2);
+        state.set_toasts_only_when_aion2(true);
+        assert!(state.toasts_only_when_aion2());
+        assert!(state.live(0).settings.toasts_only_when_aion2);
+        state.set_reset_after_secs(40);
+        assert!(state.toasts_only_when_aion2(), "saving the reset delay must keep the toast option");
+        state.set_toasts_only_when_aion2(false);
+        assert!(!state.toasts_only_when_aion2());
     }
 
     #[test]

@@ -43,7 +43,7 @@ use aion2dps::state::{AppState, Live};
 use aion2dps::target_debug::{self, DebugInfo, TargetDebug};
 use aion2dps::toast_style::{self, ToastStyle};
 use aion2dps::window_state::{self, Rect};
-use aion2dps::{capture, web};
+use aion2dps::{capture, game_process, web};
 use tauri::{
     AppHandle, Emitter, Listener, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize, RunEvent, State,
     WebviewUrl, WebviewWindow, WebviewWindowBuilder,
@@ -175,6 +175,11 @@ fn unlock(state: State<'_, Arc<AppState>>) {
 #[tauri::command]
 fn set_open_when_aion2(state: State<'_, Arc<AppState>>, on: bool) {
     state.set_open_when_aion2(on);
+}
+
+#[tauri::command]
+fn set_toasts_only_when_aion2(state: State<'_, Arc<AppState>>, on: bool) {
+    state.set_toasts_only_when_aion2(on);
 }
 
 #[tauri::command]
@@ -388,8 +393,23 @@ fn styled_origin(app: &AppHandle, style: &ToastStyle, fallback: &str, size: (f64
     toast_style::place(style, fallback, origin, screen, size, margin)
 }
 
+/// Event toasts only, when Config asks to hide them while AION 2 is closed.
+fn event_toast_blocked(app: &AppHandle, toast: &serde_json::Value) -> bool {
+    let kind = toast["kind"].as_str().unwrap_or("upcoming");
+    let key = toast["key"].as_str().unwrap_or("");
+    game_process::suppress_event_toast(
+        app.state::<Arc<AppState>>().toasts_only_when_aion2(),
+        kind,
+        key,
+        game_process::aion2_running_cached(),
+    )
+}
+
 /// Queue a toast for its lane and open that lane's window, or wake it.
 fn deliver(app: &AppHandle, toasts: &Toasts, mut toast: serde_json::Value) -> tauri::Result<()> {
+    if event_toast_blocked(app, &toast) {
+        return Ok(());
+    }
     let kind = toast["kind"].as_str().unwrap_or("upcoming").to_string();
     let style = app.state::<Arc<AppState>>().toast_style(&kind);
     let fallback = alerts_place(app);
@@ -439,18 +459,21 @@ fn deliver(app: &AppHandle, toasts: &Toasts, mut toast: serde_json::Value) -> ta
 
 /// Async so the toast window is not built on the IPC thread.
 #[tauri::command]
-async fn show_toast(app: AppHandle, toasts: State<'_, Toasts>, toast: serde_json::Value) -> Result<(), String> {
+async fn show_toast(app: AppHandle, toasts: State<'_, Toasts>, toast: serde_json::Value) -> Result<bool, String> {
+    if event_toast_blocked(&app, &toast) {
+        return Ok(false);
+    }
     let id = format!("{}:{}", toast["key"], toast["kind"]);
     {
         let mut recent = toasts.recent.lock().unwrap();
         let now = Instant::now();
         recent.retain(|_, at| now.duration_since(*at) < TOAST_DEDUP);
         if recent.contains_key(&id) {
-            return Ok(());
+            return Ok(true);
         }
         recent.insert(id, now);
     }
-    deliver(&app, &toasts, toast).map_err(|err| err.to_string())
+    deliver(&app, &toasts, toast).map(|()| true).map_err(|err| err.to_string())
 }
 
 /// Pet portraits being downloaded or that failed this run, so each is tried once.
@@ -1235,6 +1258,7 @@ fn main() {
             set_boss_settings,
             unlock,
             set_open_when_aion2,
+            set_toasts_only_when_aion2,
             set_minimize_to_tray,
             set_start_with_windows,
             set_pop_up_on_boss,

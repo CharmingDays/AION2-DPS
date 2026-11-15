@@ -427,6 +427,8 @@ pub struct SettingsView {
     pub overlay_click_through: bool,
     /// AppState-owned: check GitHub shortly after start and every hour.
     pub check_updates_automatically: bool,
+    /// AppState-owned: event toasts only while AION 2 is running. Default off.
+    pub toasts_only_when_aion2: bool,
     /// AppState-owned passive cube alert preference.
     pub hidden_cube_alerts: bool,
     /// AppState-owned: pet soul progress toasts, and seconds they stay.
@@ -629,6 +631,7 @@ impl Combat {
             pop_up_on_boss: true,
             overlay_click_through: true,
             check_updates_automatically: true,
+            toasts_only_when_aion2: false,
             hidden_cube_alerts: true,
             pet_toasts: true,
             pet_toast_secs: crate::pets::DEFAULT_TOAST_SECS,

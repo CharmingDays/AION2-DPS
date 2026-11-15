@@ -393,8 +393,13 @@
     function fire(spec) {
       const style = styles.styleFor(spec);
       if (!style.enabled) return;
-      host.show(spec);
-      if (styles.soundOn(style, settings && settings.sound)) chime(`${spec.key}:${spec.kind}`);
+      const shown = host.show(spec);
+      const maybeChime = (ok) => {
+        if (ok === false) return;
+        if (styles.soundOn(style, settings && settings.sound)) chime(`${spec.key}:${spec.kind}`);
+      };
+      if (shown && typeof shown.then === 'function') shown.then(maybeChime).catch(() => {});
+      else maybeChime(shown);
     }
 
     host.onSnooze = (t) => {

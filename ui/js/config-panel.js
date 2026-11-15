@@ -21,7 +21,7 @@
   const OPACITY_KEY = 'aion2dps.opacity';
   const SEEN_KEY = 'aion2dps.config.seen';
   /** Settings that show a NEW badge until Config has been closed once after seeing them. */
-  const FRESH = ['check_updates_automatically', 'overlay_opacity', 'debug_pets', 'debug_position', 'debug_cubes', 'pet_toasts', 'pet_toast_secs'];
+  const FRESH = ['toasts_only_when_aion2', 'check_updates_automatically', 'overlay_opacity', 'debug_pets', 'debug_position', 'debug_cubes', 'pet_toasts', 'pet_toast_secs'];
   const SAVED_MS = 2400;
   const STATUS_MS = 6000;
   /** Sections with a NEW badge in the sidebar until Config has been closed once. */
@@ -231,6 +231,7 @@
       case 'boss_damage_threshold': return bridge.setBossSettings({ damageThreshold: v });
       case 'boss_engage_lock': return bridge.setBossSettings({ engageLock: v });
       case 'open_when_aion2': return bridge.setOpenWhenAion2(v);
+      case 'toasts_only_when_aion2': return bridge.setToastsOnlyWhenAion2(v);
       case 'minimize_to_tray': return bridge.setMinimizeToTray(v);
       case 'start_with_windows': return bridge.setStartWithWindows(v);
       case 'pop_up_on_boss': return bridge.setPopUpOnBoss(v);

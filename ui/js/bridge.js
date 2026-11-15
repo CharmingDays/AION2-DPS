@@ -101,6 +101,9 @@
     setOpenWhenAion2: (on) => (inApp
       ? tauri.core.invoke('set_open_when_aion2', { on })
       : post('/api/settings', { open_when_aion2: on })),
+    setToastsOnlyWhenAion2: (on) => (inApp
+      ? tauri.core.invoke('set_toasts_only_when_aion2', { on })
+      : post('/api/settings', { toasts_only_when_aion2: on })),
     setMinimizeToTray: (on) => (inApp
       ? tauri.core.invoke('set_minimize_to_tray', { on })
       : post('/api/settings', { minimize_to_tray: on })),
