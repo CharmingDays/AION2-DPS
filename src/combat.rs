@@ -1471,9 +1471,10 @@ impl Combat {
             return;
         }
 
-        // A DoT or HoT record naming a spawned monster as its source is not
-        // player damage or healing (seen with player skill ids on bosses).
-        if hit.dot && !hit.taken && self.is_npc(hit.actor) {
+        // A DoT record naming a spawned monster as its source is not player
+        // damage (seen with player skill ids on bosses). A HoT can name the
+        // same monster unreliably; those heals are remapped in record_heal.
+        if hit.dot && !hit.taken && self.is_npc(hit.actor) && !plausible_heal(hit.heal) {
             return;
         }
 
@@ -1487,11 +1488,13 @@ impl Combat {
         }
 
         if plausible_heal(hit.heal) {
+            let skill = crate::skills::canonical_skill_id(hit.skill);
+            let actor = self.credited_heal_actor(hit.actor, skill);
             // `05 38` names its source unreliably: a tick never makes a player.
-            if !hit.dot {
-                self.note_player(hit.actor);
+            if !hit.dot && self.trust_heal_actor(actor) {
+                self.note_player(actor);
             }
-            self.record_heal(now, hit);
+            self.record_heal(now, hit, actor);
             if hit.total() == 0 {
                 self.note(now, hit, false, true);
                 return;
@@ -1529,16 +1532,16 @@ impl Combat {
         self.note(now, hit, false, false);
     }
 
-    fn record_heal(&mut self, now: i64, hit: &Hit) {
+    fn record_heal(&mut self, now: i64, hit: &Hit, actor: i32) {
         let skill = crate::skills::canonical_skill_id(hit.skill);
-        *self.heal.entry(hit.actor).or_insert(0) += i64::from(hit.heal);
-        let row = self.heal_skills.entry((hit.actor, skill, hit.dot)).or_insert((0, 0));
+        *self.heal.entry(actor).or_insert(0) += i64::from(hit.heal);
+        let row = self.heal_skills.entry((actor, skill, hit.dot)).or_insert((0, 0));
         row.0 += i64::from(hit.heal);
         row.1 += 1;
         if self.heal_events.len() < SESSION_EVENT_LIMIT {
             self.heal_events.push(HealEvent {
                 at: now,
-                actor: hit.actor,
+                actor,
                 amount: hit.heal,
                 hot: hit.dot,
                 skill,
@@ -1553,7 +1556,7 @@ impl Combat {
         let mut by_owner: HashMap<i32, HashMap<(i32, bool), (i64, i32)>> = HashMap::new();
         for ((actor, skill, hot), (heal, ticks)) in &self.heal_skills {
             let row = by_owner
-                .entry(self.owner_of(*actor))
+                .entry(self.credited_heal_actor(*actor, *skill))
                 .or_default()
                 .entry((*skill, *hot))
                 .or_insert((0, 0));
@@ -1578,7 +1581,7 @@ impl Combat {
                 skills.sort_by(|a, b| b.heal.cmp(&a.heal).then(a.id.cmp(&b.id)));
                 HealerRow {
                     id,
-                    name: self.label(id),
+                    name: self.meter_label(id),
                     you: self.self_id == Some(id),
                     heal,
                     hps: per_second(heal, active_ms),
@@ -1901,7 +1904,7 @@ impl Combat {
             .heal_events
             .iter()
             .filter_map(|event| {
-                let actor = *index.get(&self.named_id(event.actor))?;
+                let actor = *index.get(&self.named_id(self.credited_heal_actor(event.actor, event.skill)))?;
                 let flags = if event.hot { sessions::FLAG_HOT } else { 0 };
                 let t_ms = event.at.saturating_sub(started_at).max(0);
                 Some(sessions::Heal(t_ms, actor, i64::from(event.amount), flags, event.skill))
@@ -2096,7 +2099,7 @@ impl Combat {
         skills.sort_by(|a, b| b.damage.cmp(&a.damage));
         PlayerRow {
             id,
-            name: self.label(id),
+            name: self.meter_label(id),
             you: self.self_id == Some(id),
             damage: actor.damage,
             dps: per_second(actor.damage, active_ms),
@@ -2198,6 +2201,55 @@ impl Combat {
     /// A summon is shown under its owner when that link is known.
     fn named_id(&self, id: i32) -> i32 {
         self.owner_of(id)
+    }
+
+    /// A real player or one of their summons, not a spawned monster.
+    fn trust_heal_actor(&self, id: i32) -> bool {
+        self.is_player(id) && !self.is_npc(id)
+    }
+
+    /// The one trusted player who already has this heal skill, if there is only one.
+    fn unique_player_healer(&self, skill: i32) -> Option<i32> {
+        let mut found = None;
+        for ((actor, s, _), _) in &self.heal_skills {
+            if *s != skill {
+                continue;
+            }
+            let owner = self.owner_of(*actor);
+            if !self.trust_heal_actor(owner) {
+                continue;
+            }
+            match found {
+                None => found = Some(owner),
+                Some(id) if id != owner => return None,
+                _ => {}
+            }
+        }
+        found
+    }
+
+    /// Owner of the source, or the unique player already using this skill when
+    /// a heal names an NPC unreliably (`05 38`).
+    fn credited_heal_actor(&self, actor: i32, skill: i32) -> i32 {
+        let owner = self.owner_of(actor);
+        if self.trust_heal_actor(owner) {
+            owner
+        } else {
+            self.unique_player_healer(skill).unwrap_or(owner)
+        }
+    }
+
+    /// Name shown on the meter and in a saved session. A monster id that still
+    /// has player damage or healing is Unknown, never the monster's name.
+    fn meter_label(&self, id: i32) -> String {
+        if self.is_npc(id) {
+            self.name_of(id)
+                .cloned()
+                .filter(|name| !is_fallback(name))
+                .unwrap_or_else(|| UNKNOWN.to_string())
+        } else {
+            self.label(id)
+        }
     }
 
     /// Whether a real name has been seen for this entity (or its owner).
@@ -3210,6 +3262,30 @@ mod tests {
         assert!(session.skill_names.contains_key(&300));
         combat.reset(3_000);
         assert!(combat.heal_events.is_empty());
+    }
+
+    #[test]
+    fn hots_naming_the_boss_are_credited_to_the_player_who_cast_them() {
+        let mut combat = Combat::new();
+        combat.apply(Event::Spawn { id: 500, monster_type: 4_242 }, 0);
+        combat.set_name(1, "Feip", false);
+        combat.apply_hit(&hit(1, 500, 100, 1_000), 0);
+        combat.apply_hit(&heal(1, 18_730_000, 1_000, true), 100);
+        combat.apply_hit(&heal(500, 18_730_000, 500, true), 200);
+        let snap = combat.snapshot(1_000);
+        assert_eq!(snap.encounter_heal, 1_500);
+        assert_eq!(snap.healers.len(), 1);
+        assert_eq!((snap.healers[0].name.as_str(), snap.healers[0].heal), ("Feip", 1_500));
+        let session = combat.session(1_000).unwrap();
+        assert_eq!(session.actors, ["Feip"]);
+        assert_eq!(session.players[0].heal, 1_500);
+        assert_eq!(
+            session.heals,
+            [
+                sessions::Heal(100, 0, 1_000, sessions::FLAG_HOT, 18_730_000),
+                sessions::Heal(200, 0, 500, sessions::FLAG_HOT, 18_730_000),
+            ]
+        );
     }
 
     const BOSS_ID: i32 = 500;

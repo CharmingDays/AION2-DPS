@@ -1,7 +1,8 @@
 // Session history: the saved sessions, a summary, damage over time with a
 // playhead, the players table and an ability feed as they stood at the
-// playhead. A session opens paused at the start. Same page in the app's
-// history window and at http://127.0.0.1:18732/history.
+// playhead. A session opens paused at the completed fight; Play starts the
+// replay from the beginning. Same page in the app's history window and at
+// http://127.0.0.1:18732/history.
 (function () {
   const { esc, short, full, clock, pct, rate, UNKNOWN } = window.fmt;
   const bridge = window.meterBridge;
@@ -200,7 +201,7 @@
     layoutTabs();
     renderSummary();
     renderChart();
-    seek(0);
+    seek(span);
   }
 
   function renderSummary() {
@@ -247,7 +248,7 @@
   }
 
   function renderState() {
-    const at = playhead <= 0 ? 'paused at start' : playhead >= span ? 'replay finished' : `paused at ${clock(playhead)}`;
+    const at = playhead <= 0 ? 'paused at start' : playhead >= span ? 'paused at end' : `paused at ${clock(playhead)}`;
     $('when').textContent = `\u00b7 ${when(session.started_at)} \u00b7 ${playing ? `replaying ${speed}x` : at}`;
     $('pb-state').textContent = playing ? 'Playing' : 'Paused';
     $('pb-state').classList.toggle('on', playing);
@@ -484,7 +485,7 @@
       .filter((p) => p.heal > 0)
       .sort((a, b) => b.heal - a.heal || a.name.localeCompare(b.name));
     const top = rows.length ? rows[0].heal : 1;
-    $('heal-rows').innerHTML = rows.length ? rows.map((p) => `<tr style="--pc:${pc(p.i)}" class="player${p.name === UNKNOWN ? ' unknown' : ''}">
+    $('heal-rows').innerHTML = rows.length ? rows.map((p) => `<tr data-actor="${p.i}" style="--pc:${pc(p.i)}" class="player${p.name === UNKNOWN ? ' unknown' : ''}${healScope === 'player' && p.i === selectedActor ? ' sel' : ''}">
         <td><span class="name pname">${esc(p.name)}</span></td>
         <td class="dmg" title="${full(p.heal)}">${short(p.heal)}</td>
         <td class="dim">${short((p.heal * 1000) / activeMs)}</td>
@@ -666,20 +667,23 @@
     document.querySelectorAll('#feed-filters > button').forEach((b) => b.classList.toggle('on', b.dataset.filter === 'all'));
     closePicker(false);
     scopeLabel();
+    healScopeLabel();
     feedLabel();
   }
 
   /** Each Select player button and the list it opens. */
   const PICKERS = { share: ['scope-player', 'player-pick'], feed: ['filter-player', 'feed-pick'], heal: ['heal-scope-player', 'heal-pick'] };
 
-  /** The player picker under Select player: everyone in the session, by damage at the playhead. */
+  /** The player picker under Select player: everyone in the session, by damage
+   *  (or healing, on the Healing tab) at the playhead. */
   function openPicker(which) {
     if (!session) return;
     closePicker(false);
     pickFor = which;
     const list = $(PICKERS[which][1]);
+    const amount = (i) => (which === 'heal' && hacc ? hacc.heal[i] : acc.damage[i]) || 0;
     const rows = session.actors
-      .map((name, i) => ({ i, name, damage: acc.damage[i] || 0 }))
+      .map((name, i) => ({ i, name, damage: amount(i) }))
       .sort((a, b) => b.damage - a.damage || a.name.localeCompare(b.name));
     list.innerHTML = rows.length
       ? rows.map((p) => `<li role="option" tabindex="-1" data-actor="${p.i}" aria-selected="${p.i === selectedActor}" class="${p.i === selectedActor ? 'sel' : ''}" style="--pc:${pc(p.i)}">
@@ -1017,6 +1021,14 @@
     const row = $('heal-other');
     if (row) row.focus();
   };
+  $('heal-rows').addEventListener('click', (event) => {
+    const row = event.target.closest('tr[data-actor]');
+    if (!row || !session) return;
+    selectedActor = Number(row.dataset.actor);
+    healScope = 'player';
+    document.querySelectorAll('#heal-scope > button').forEach((b) => b.classList.toggle('on', b.dataset.scope === 'player'));
+    renderHeal(true);
+  });
   $('heal-skill-rows').addEventListener('click', (event) => {
     if (event.target.closest('#heal-other')) toggleHealOther();
   });

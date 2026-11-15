@@ -21,7 +21,7 @@
 //! An optional `name` is a user-given label shown in history. Missing or empty
 //! falls back to `target.label`. Renaming never changes the file name (the id).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -324,6 +324,7 @@ pub fn list(dir: &Path) -> Vec<Summary> {
 pub fn load(dir: &Path, id: &str) -> Result<Session, Error> {
     let mut session = parse(&std::fs::read(file(dir, id)?)?)?;
     fill_skill_names(&mut session);
+    reassign_misattributed_heals(&mut session);
     Ok(session)
 }
 
@@ -352,6 +353,162 @@ pub fn skill_names_with(events: &[Event], heals: &[Heal]) -> BTreeMap<i32, Strin
             .or_insert_with(|| crate::skills::skill_name(skill));
     }
     names
+}
+
+/// HoT ticks sometimes name the boss or another NPC as the source. When a
+/// saved session still has those, move them onto the one other actor who
+/// used that skill, rename a leftover boss-named row to Unknown, and drop
+/// empty monster rows. The file on disk is left as it was saved.
+fn reassign_misattributed_heals(session: &mut Session) {
+    if session.heals.is_empty() {
+        return;
+    }
+    let target = session.target.label.as_str();
+    let suspect = |name: &str| {
+        name == crate::combat::MONSTER || name == crate::combat::BOSS || name == target
+    };
+
+    let mut owners: HashMap<i32, Option<u32>> = HashMap::new();
+    for heal in &session.heals {
+        let Some(name) = session.actors.get(heal.1 as usize) else {
+            continue;
+        };
+        if suspect(name) {
+            continue;
+        }
+        match owners.get(&heal.4).copied() {
+            None => {
+                owners.insert(heal.4, Some(heal.1));
+            }
+            Some(Some(id)) if id != heal.1 => {
+                owners.insert(heal.4, None);
+            }
+            _ => {}
+        }
+    }
+
+    let mut moves: Vec<(u32, u32, i64)> = Vec::new();
+    for heal in &mut session.heals {
+        let Some(name) = session.actors.get(heal.1 as usize) else {
+            continue;
+        };
+        if !suspect(name) {
+            continue;
+        }
+        let Some(Some(dest)) = owners.get(&heal.4).copied() else {
+            continue;
+        };
+        if dest == heal.1 {
+            continue;
+        }
+        moves.push((heal.1, dest, heal.2));
+        heal.1 = dest;
+    }
+    for (from, to, amount) in moves {
+        if let Some(player) = session.players.get_mut(from as usize) {
+            player.heal = player.heal.saturating_sub(amount);
+        }
+        if let Some(player) = session.players.get_mut(to as usize) {
+            player.heal = player.heal.saturating_add(amount);
+        }
+    }
+    for player in &mut session.players {
+        player.hps = if session.duration_ms <= 0 {
+            0
+        } else {
+            player.heal.saturating_mul(1000) / session.duration_ms
+        };
+    }
+
+    for i in 0..session.actors.len() {
+        if !suspect(&session.actors[i]) || session.actors[i] == crate::combat::UNKNOWN {
+            continue;
+        }
+        let leftover = session
+            .players
+            .get(i)
+            .is_some_and(|player| player.total > 0 || player.heal > 0)
+            || session.heals.iter().any(|heal| heal.1 == i as u32)
+            || session.events.iter().any(|event| event.1 == i as u32);
+        if leftover {
+            session.actors[i] = crate::combat::UNKNOWN.to_string();
+            if let Some(player) = session.players.get_mut(i) {
+                player.name = crate::combat::UNKNOWN.to_string();
+            }
+        }
+    }
+
+    compact_unused_actors(session);
+}
+
+fn compact_unused_actors(session: &mut Session) {
+    let n = session.actors.len();
+    if n == 0 {
+        return;
+    }
+    let mut used = vec![false; n];
+    let mark = |used: &mut [bool], i: u32| {
+        if (i as usize) < used.len() {
+            used[i as usize] = true;
+        }
+    };
+    if let Some(you) = session.you {
+        mark(&mut used, you);
+    }
+    for event in &session.events {
+        mark(&mut used, event.1);
+    }
+    for heal in &session.heals {
+        mark(&mut used, heal.1);
+    }
+    for row in &session.stagger {
+        mark(&mut used, row.1);
+    }
+    for (i, player) in session.players.iter().enumerate() {
+        if i < n && (player.total > 0 || player.heal > 0) {
+            used[i] = true;
+        }
+    }
+    if used.iter().all(|flag| *flag) {
+        return;
+    }
+    let mut map = vec![0u32; n];
+    let mut next = 0u32;
+    let mut actors = Vec::new();
+    let mut players = Vec::new();
+    for i in 0..n {
+        if !used[i] {
+            continue;
+        }
+        map[i] = next;
+        actors.push(session.actors[i].clone());
+        if i < session.players.len() {
+            players.push(session.players[i].clone());
+        }
+        next += 1;
+    }
+    for event in &mut session.events {
+        if (event.1 as usize) < n {
+            event.1 = map[event.1 as usize];
+        }
+    }
+    for heal in &mut session.heals {
+        if (heal.1 as usize) < n {
+            heal.1 = map[heal.1 as usize];
+        }
+    }
+    for row in &mut session.stagger {
+        if (row.1 as usize) < n {
+            row.1 = map[row.1 as usize];
+        }
+    }
+    if let Some(you) = session.you {
+        if (you as usize) < n {
+            session.you = Some(map[you as usize]);
+        }
+    }
+    session.actors = actors;
+    session.players = players;
 }
 
 /// Name the skills of a session saved without names. True when it changed.
@@ -669,6 +826,69 @@ mod tests {
         assert!(session.heals.is_empty());
         assert_eq!((session.totals.total_heal, session.players[0].heal), (0, 0));
         assert_eq!(list(&dir).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_moves_boss_named_hots_onto_the_player_who_cast_them() {
+        let dir = temp_dir("heal-reassign");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = sample(1_700_000_000_000, "Verdunallia");
+        session.duration_ms = 10_000;
+        session.actors = vec!["Feip".into(), "Verdunallia".into(), "Monster".into()];
+        session.players = vec![
+            Player {
+                name: "Feip".into(),
+                total: 3_000,
+                dps: 300,
+                share: 100.0,
+                crit_pct: 0.0,
+                heal: 1_000,
+                hps: 100,
+                stagger: 0.0,
+            },
+            Player {
+                name: "Verdunallia".into(),
+                total: 0,
+                dps: 0,
+                share: 0.0,
+                crit_pct: 0.0,
+                heal: 500,
+                hps: 50,
+                stagger: 0.0,
+            },
+            Player {
+                name: "Monster".into(),
+                total: 0,
+                dps: 0,
+                share: 0.0,
+                crit_pct: 0.0,
+                heal: 200,
+                hps: 20,
+                stagger: 0.0,
+            },
+        ];
+        session.events = vec![Event(0, 0, 3_000, 0, 100)];
+        session.heals = vec![
+            Heal(100, 0, 1_000, FLAG_HOT, 18_730_000),
+            Heal(200, 1, 500, FLAG_HOT, 18_730_000),
+            Heal(300, 2, 200, FLAG_HOT, 18_730_000),
+        ];
+        session.totals.total_heal = 1_700;
+        let id = "20231114-221320-verdunallia";
+        std::fs::write(dir.join(format!("{id}.json")), serde_json::to_string(&session).unwrap()).unwrap();
+        let loaded = load(&dir, id).unwrap();
+        assert_eq!(loaded.actors, ["Feip"]);
+        assert_eq!(loaded.players[0].heal, 1_700);
+        assert_eq!(loaded.players[0].hps, 170);
+        assert_eq!(
+            loaded.heals,
+            [
+                Heal(100, 0, 1_000, FLAG_HOT, 18_730_000),
+                Heal(200, 0, 500, FLAG_HOT, 18_730_000),
+                Heal(300, 0, 200, FLAG_HOT, 18_730_000),
+            ]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

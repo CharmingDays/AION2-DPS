@@ -226,9 +226,9 @@ tr.open .caret { transform: rotate(90deg) translateX(2px); }
 .share-empty[hidden] { display: none; }
 
 /* Select player picker on the Ability share tab */
-#share-scope, #feed-filters { position: relative; }
+#share-scope, #feed-filters, #heal-scope { position: relative; }
 #feed-pick { right: auto; left: 0; max-width: calc(100vw - 2 * var(--s-3)); }
-#scope-player.picked::after, #filter-player.picked::after { content: ""; display: inline-block; margin-left: 6px; vertical-align: 2px; border: 4px solid transparent; border-top-color: currentColor; border-bottom: 0; }
+#scope-player.picked::after, #filter-player.picked::after, #heal-scope-player.picked::after { content: ""; display: inline-block; margin-left: 6px; vertical-align: 2px; border: 4px solid transparent; border-top-color: currentColor; border-bottom: 0; }
 .pick-list[hidden] { display: none; }
 .pick-list { position: absolute; top: calc(100% + 4px); right: 0; z-index: 20; min-width: 220px; max-height: 260px; overflow-y: auto; margin: 0; padding: var(--s-1); list-style: none; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); }
 .pick-list li[role="option"] { display: flex; align-items: center; gap: var(--s-2); padding: 6px var(--s-2); border-radius: var(--r-sm); color: var(--text); font-size: 12px; cursor: pointer; outline: none; }
@@ -266,7 +266,7 @@ tr.player .share > i, .share-table .share > i { background: var(--pc, var(--acce
 .legend .chip:disabled { opacity: 0.4; cursor: default; }
 .tabs button.heal-tab.on { border-bottom-color: var(--heal); }
 #heal-view[hidden], .heal-controls[hidden], .heal-empty[hidden], .heal-grid[hidden], #filter-heals[hidden] { display: none; }
-.heal-controls { display: flex; justify-content: flex-end; margin-bottom: var(--s-2); }
+.heal-controls { position: relative; display: flex; justify-content: flex-end; margin-bottom: var(--s-2); overflow: visible; }
 .heal-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--s-6); }
 .heal-grid .sub-head { margin: 0 0 var(--s-2); font-size: 12px; font-weight: 600; }
 .heal-table col.c-heal-bar { width: 128px; }
