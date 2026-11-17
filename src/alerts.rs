@@ -602,6 +602,9 @@ pub fn seed_defaults(alerts: &mut Alerts) -> bool {
 }
 
 /// The saved alerts, or the defaults when the file is missing or unreadable.
+/// A file that is not valid alerts JSON is moved aside as
+/// `alerts.json.corrupt-<unix secs>` first (the newest few are kept), so
+/// saving the defaults does not destroy it.
 /// A file that parses but would fail validation (for example duplicate
 /// built-in ids left by an older migrate) is repaired in place instead of
 /// being thrown away.
@@ -612,10 +615,22 @@ pub fn load(path: &Path) -> Alerts {
 /// Like `load`, plus whether the alerts were repaired or migrated and should
 /// be written back.
 pub fn load_and_prepare(path: &Path) -> (Alerts, bool) {
-    let mut alerts = std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Alerts>(&bytes).ok())
-        .unwrap_or_default();
+    let mut alerts = match std::fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice::<Alerts>(&bytes) {
+            Ok(alerts) => alerts,
+            Err(err) => {
+                tracing::warn!("{} is not valid alerts JSON ({err}); using the defaults", path.display());
+                storage::keep_corrupt(path);
+                Alerts::default()
+            }
+        },
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("could not read {}: {err}", path.display());
+            }
+            Alerts::default()
+        }
+    };
     let changed = prepare_alerts(&mut alerts);
     (validate(alerts.clone()).unwrap_or(alerts), changed)
 }
@@ -729,6 +744,9 @@ mod tests {
         assert_eq!(load(&path), alerts);
         std::fs::write(&path, b"{not json").unwrap();
         assert_eq!(load(&path), Alerts::default(), "damaged file");
+        let kept = storage::corrupt_copies(&path);
+        assert_eq!(kept.len(), 1, "the damaged file is kept aside");
+        assert_eq!(std::fs::read(&kept[0]).unwrap(), b"{not json");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

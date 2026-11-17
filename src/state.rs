@@ -941,27 +941,76 @@ fn settings_path() -> Option<PathBuf> {
 }
 
 fn load_settings() -> StoredSettings {
-    settings_path()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    settings_path().map(|path| load_settings_from(&path)).unwrap_or_default()
+}
+
+/// The saved settings, or the defaults when the file is missing. A file that
+/// is not valid settings JSON is moved aside as
+/// `settings.json.corrupt-<unix secs>` (the newest few are kept), so the next
+/// save does not destroy it.
+fn load_settings_from(path: &Path) -> StoredSettings {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("could not read {}: {err}", path.display());
+            }
+            return StoredSettings::default();
+        }
+    };
+    match serde_json::from_str(&text) {
+        Ok(stored) => stored,
+        Err(err) => {
+            tracing::warn!("{} is not valid settings JSON ({err}); using the defaults", path.display());
+            crate::storage::keep_corrupt(path);
+            StoredSettings::default()
+        }
+    }
 }
 
 fn store_settings(settings: &StoredSettings) {
     let Some(path) = settings_path() else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(text) = serde_json::to_string(settings) {
-        let _ = std::fs::write(path, text);
+    store_settings_to(&path, settings);
+}
+
+/// Written to a temp file, flushed and renamed over the old one, so a crash
+/// or full disk mid-save never leaves a half-written settings file.
+fn store_settings_to(path: &Path, settings: &StoredSettings) {
+    match serde_json::to_vec(settings) {
+        Ok(bytes) => {
+            if let Err(err) = crate::storage::write_atomic(path, &bytes) {
+                tracing::warn!("could not save settings to {}: {err}", path.display());
+            }
+        }
+        Err(err) => tracing::warn!("could not encode settings: {err}"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_are_saved_atomically_and_a_corrupt_file_is_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("aion2dps-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        assert_eq!(load_settings_from(&path), StoredSettings::default(), "missing file");
+        let stored = StoredSettings {
+            start_in_tray: false,
+            ..StoredSettings::default()
+        };
+        store_settings_to(&path, &stored);
+        assert_eq!(load_settings_from(&path), stored);
+        std::fs::write(&path, "{ not json").unwrap();
+        assert_eq!(load_settings_from(&path), StoredSettings::default(), "damaged file");
+        let kept = crate::storage::corrupt_copies(&path);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(&kept[0]).unwrap(), "{ not json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn cube_setting_defaults_on_and_roundtrips_live_without_enabling_demo_alerts() {
