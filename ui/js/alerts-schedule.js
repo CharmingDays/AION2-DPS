@@ -38,12 +38,14 @@
     onDay: ([y, mo, d], days, minutes) => new Date(y, mo, d + days, Math.floor(minutes / 60), minutes % 60).getTime(),
     dayOf: (ms) => { const t = new Date(ms); return [t.getFullYear(), t.getMonth(), t.getDate()]; },
     weekday: (ms) => (new Date(ms).getDay() + 6) % 7,
+    minuteOf: (ms) => { const t = new Date(ms); return t.getHours() * 60 + t.getMinutes(); },
   };
   const UTC = {
     atDay: (ms, minutes) => Math.floor(ms / DAY) * DAY + minutes * MINUTE,
     onDay: ([y, mo, d], days, minutes) => Date.UTC(y, mo, d + days, Math.floor(minutes / 60), minutes % 60),
     dayOf: (ms) => { const t = new Date(ms); return [t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()]; },
     weekday: (ms) => (new Date(ms).getUTCDay() + 6) % 7,
+    minuteOf: (ms) => Math.floor((((ms % DAY) + DAY) % DAY) / MINUTE),
   };
   const DEFAULT_SERVER_OFFSET_MINS = -8 * 60;
   const DEFAULT_ZONE = 'America/Los_Angeles';
@@ -70,17 +72,66 @@
     return (region && region.zone) || DEFAULT_ZONE;
   }
 
-  /** Minutes east of UTC at `utcMs` in `timeZone`. */
-  function zoneOffsetMins(utcMs, timeZone) {
+  /**
+   * Standard (winter) offsets for the region zones, used only if this browser
+   * cannot report a zone's offset at all. Better than UTC: at worst an hour
+   * off during daylight saving instead of 7 to 8 hours.
+   */
+  const FALLBACK_OFFSET_MINS = { 'America/Los_Angeles': -8 * 60, 'America/New_York': -5 * 60, 'Europe/Berlin': 60 };
+  const warnedZones = new Set();
+
+  function warnZone(timeZone, why) {
+    if (warnedZones.has(timeZone)) return;
+    warnedZones.add(timeZone);
+    if (typeof console !== 'undefined') console.warn(`[alerts] could not read the UTC offset of ${timeZone} (${why}); using a fallback`);
+  }
+
+  /** Offset from `longOffset` ("GMT-07:00", or "GMT" for zero), or null. */
+  function longOffsetMins(utcMs, timeZone) {
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone,
       timeZoneName: 'longOffset',
       hourCycle: 'h23',
     }).formatToParts(new Date(utcMs));
     const name = (parts.find((p) => p.type === 'timeZoneName') || {}).value || '';
+    if (name === 'GMT' || name === 'UTC') return 0;
     const m = /([+-])(\d{1,2})(?::(\d{2}))?/.exec(name);
-    if (!m) return 0;
+    if (!m) return null;
     return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] || 0));
+  }
+
+  /** Offset from the zone's wall-clock fields, which every engine supports. */
+  function wallOffsetMins(utcMs, timeZone) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(new Date(utcMs));
+    const get = (t) => Number((parts.find((p) => p.type === t) || {}).value);
+    const wall = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour') % 24, get('minute'), get('second'));
+    if (!Number.isFinite(wall)) return null;
+    return Math.round((wall - Math.floor(utcMs / 1000) * 1000) / MINUTE);
+  }
+
+  /**
+   * Minutes east of UTC at `utcMs` in `timeZone`. If the browser cannot say,
+   * use the zone's standard offset, then this PC's own offset, and log it
+   * once, rather than silently using UTC.
+   */
+  function zoneOffsetMins(utcMs, timeZone) {
+    let why = 'no offset in the zone name';
+    try {
+      const long = longOffsetMins(utcMs, timeZone);
+      if (long != null) return long;
+    } catch (err) { why = String(err && err.message || err); }
+    try {
+      const wall = wallOffsetMins(utcMs, timeZone);
+      if (wall != null) return wall;
+    } catch (err) { why = String(err && err.message || err); }
+    warnZone(timeZone, why);
+    if (Object.prototype.hasOwnProperty.call(FALLBACK_OFFSET_MINS, timeZone)) return FALLBACK_OFFSET_MINS[timeZone];
+    return -new Date(utcMs).getTimezoneOffset();
   }
 
   /** Calendar date `[y, monthIndex, d]` of `utcMs` in `timeZone`. */
@@ -122,6 +173,11 @@
       },
       dayOf: (ms) => zoneDayOf(ms, timeZone),
       weekday: (ms) => zoneWeekday(ms, timeZone),
+      minuteOf: (ms) => {
+        const off = zoneOffsetMins(ms, timeZone);
+        const wall = Math.floor((ms + off * MINUTE) / MINUTE);
+        return ((wall % 1440) + 1440) % 1440;
+      },
     };
   }
 
@@ -211,10 +267,21 @@
       return at > after ? at : null;
     }
     if (step > 0) {
-      const base = start != null ? start : atDay(after, minutes);
       if (start != null && after < start) return start;
-      const ms = step * MINUTE;
-      return base + (Math.floor((after - base) / ms) + 1) * ms;
+      // Step on the clock's wall time, not by adding milliseconds, so "every
+      // 3 hours from 01:00" stays 01:00, 04:00, 07:00 across a daylight
+      // saving change (adding 3 h of real time would drift an hour).
+      const anchor = startDay || dayOf(after);
+      const wallAfter = daysBetween(anchor, dayOf(after)) * 1440 + cal.minuteOf(after);
+      let n = Math.max(0, Math.floor((wallAfter - minutes) / step) + 1);
+      const atStep = (k) => {
+        const wall = minutes + k * step;
+        return onDay(anchor, Math.floor(wall / 1440), ((wall % 1440) + 1440) % 1440);
+      };
+      let at = atStep(n);
+      // A repeated hour (clocks going back) can map a step at or before `after`.
+      for (let guard = 0; at <= after && guard < 1000; guard += 1) { n += 1; at = atStep(n); }
+      return at;
     }
     if (r.type === 'daily') {
       const every = Math.max(1, Number(r.every) || 1);
