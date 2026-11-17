@@ -65,6 +65,7 @@ Get the files from the Releases page.
 
 - Start the game, then start the app as Administrator. Start it before a boss spawns so names and bosses are recognised.
 - aion2dps starts in the system tray (**Start in tray** in Config > General, on by default). Click the tray icon, or right-click it and pick Show overlay, to open the overlay. If packet capture fails at launch (for example Npcap is missing or needs admin), the overlay opens by itself so you see the notice. Turn the setting off to open the overlay at launch instead.
+- Only one copy runs at a time. Launching aion2dps again (Start menu or desktop shortcut) while it sits in the tray shows the running copy's overlay instead of starting a second one.
 - The **overlay** opens from the tray (or at launch with Start in tray off). Drag to move, resize from the edges, `-`/`+` for opacity. Left-click the close button to hide to the tray, or to quit if **Minimize to tray when overlay is closed** is off in Config > General. Right-click it to quit.
 - Open the **detailed meter** from the overlay's hover buttons, or browse to `http://127.0.0.1:18732/` (`/overlay` gives the compact view, handy as a stream browser source; `/history` gives session history).
 - **Demo mode**: `aion2dps.exe --demo` shows sample combat with no game or Npcap needed.
@@ -141,7 +142,7 @@ GPL-3.0-or-later. See [LICENSE](LICENSE). Third-party notices are in [docs/third
 
 **Detailed meter**: a top bar with the target, fight time, group total damage and group DPS; a players table (rank, name, total damage, DPS, % of group, crit %, share bar); a **Damage by skill** panel for the selected player; recent hits; finished pulls; and the reset-delay setting. The same page is served at `http://127.0.0.1:18732/` for any browser, and `/overlay` serves the compact view (useful as a stream browser source). The server listens on `127.0.0.1` only.
 
-Inside the app, the windows get a combat snapshot every 200 ms as a Tauri `live` event, and actions (reset, target mode, reset delay, clear history) are Tauri commands. The browser page polls `/api/live` and posts to `/api/...`. Both use the same JSON snapshot.
+Inside the app, the windows get a combat snapshot every 200 ms as a Tauri `live` event, and actions (reset, target mode, reset delay, clear history) are Tauri commands. The browser page polls `/api/live` and posts to `/api/...`. Both use the same JSON snapshot. Every `/api/...` request, reads included, needs the header `X-Aion2dps: 1` and a `Host` of `127.0.0.1` or `localhost`; the served pages add it themselves, so another web site open in your browser cannot read the meter. The pages (`/`, `/overlay`, `/history`) stay open without it, so an OBS browser source pointed at `http://127.0.0.1:18732/overlay` keeps working. Scripts calling the API directly (for example `curl`) must send the header.
 
 ### Fight lifecycle
 
@@ -169,7 +170,7 @@ Monster names are not in the packets, but each monster's `41 36` spawn record ca
 - Only a target whose spawn was seen has a type. A target that spawned before the meter started shows a hint instead: *Start the meter before the target spawns*.
 - A type name, yours or bundled, wins over any name read from packets. A target with no type keeps the *Monster* and *Unknown* labels.
 - The table is saved to `%LOCALAPPDATA%\aion2dps\monster-names.json` as a JSON object of decimal type to name, for example `{"2100097": "Rock Golem"}`. A missing or unreadable file starts an empty table (an unreadable one is copied to `monster-names.json.bad` first). `--demo` uses `monster-names-demo.json` instead, so sample names never touch the real table.
-- In a browser: `GET /api/monster-names` lists `[{"type": n, "name": "..."}]`, and `POST /api/monster-name` with `{"type": n, "name": "..."}` sets one. The POST needs `Content-Type: application/json` and the header `X-Aion2dps: 1`, so another web page cannot change your names.
+- In a browser: `GET /api/monster-names` lists `[{"type": n, "name": "..."}]`, and `POST /api/monster-name` with `{"type": n, "name": "..."}` sets one. Both need the header `X-Aion2dps: 1` (and the POST `Content-Type: application/json`), so another web page cannot read or change your names.
 
 ### Saving sessions
 
@@ -191,7 +192,7 @@ Schema (`schema_version: 1`):
 - `events`: one compact array per hit, `[t_ms, actor_idx, damage, flags, skill]`: `t_ms` from the first hit, `flags` is a bit set (1 = crit, 2 = damage over time), `skill` the skill id.
 - `truncated`: the meter keeps at most 200,000 hits per fight. Past that it keeps counting the totals but stops recording hits, and the replay covers only the first 200,000.
 
-In a browser: `POST /api/session/save` saves, `GET /api/sessions` lists, `GET /api/sessions/{id}` reads one, `GET /api/sessions/{id}/export` downloads it, and `DELETE /api/sessions/{id}` deletes it. The POST and DELETE need the header `X-Aion2dps: 1` (and `Content-Type: application/json` if they have a body), like the monster name POST. An id is 1 to 96 of `0-9 A-Z a-z _ -`, so it cannot point outside the folder, and no response contains a file path.
+In a browser: `POST /api/session/save` saves, `GET /api/sessions` lists, `GET /api/sessions/{id}` reads one, `GET /api/sessions/{id}/export` downloads it, and `DELETE /api/sessions/{id}` deletes it. All of them need the header `X-Aion2dps: 1` (and `Content-Type: application/json` if they have a body), like the monster names API. An id is 1 to 96 of `0-9 A-Z a-z _ -`, so it cannot point outside the folder, and no response contains a file path.
 
 TODO: the round class icon next to each name is a placeholder. The decoder does not read a player's class from the packets yet.
 

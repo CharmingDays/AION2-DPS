@@ -7,8 +7,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Request, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -26,6 +27,11 @@ pub const DEFAULT_PORT: u16 = 18732;
 /// send a custom header to 127.0.0.1 without a CORS preflight this server
 /// never approves.
 pub const WRITE_HEADER: &str = "x-aion2dps";
+/// Every `/api/...` request, reads included, needs the same header, so a page
+/// on another site cannot read the meter, sessions or alerts either. The pages
+/// this server sends add it themselves; `/`, `/overlay` and `/history` (and
+/// their CSS/JS) stay open, so a stream browser source keeps working.
+pub const API_HEADER: &str = WRITE_HEADER;
 
 const HTML: &str = "text/html; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
@@ -107,6 +113,7 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> std::io::Result<u16> {
         .route("/api/alerts", get(get_alerts).put(put_alerts))
         .route("/api/alerts/restore-defaults", post(restore_default_alerts))
         .fallback(page)
+        .layer(middleware::from_fn(guard_api))
         .with_state(state);
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
     let bound = listener.local_addr()?.port();
@@ -116,6 +123,41 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> std::io::Result<u16> {
         }
     });
     Ok(bound)
+}
+
+/// `/api/...` only: refuse requests without [`API_HEADER`], and requests whose
+/// `Host` is not this machine (a DNS-rebinding page would send its own name).
+async fn guard_api(req: Request, next: Next) -> Response {
+    if let Err(rejected) = check_api(req.uri().path(), req.headers()) {
+        return rejected;
+    }
+    next.run(req).await
+}
+
+fn check_api(path: &str, headers: &HeaderMap) -> Result<(), Response> {
+    if path != "/api" && !path.starts_with("/api/") {
+        return Ok(());
+    }
+    if !host_is_local(headers) {
+        return Err((StatusCode::FORBIDDEN, "unexpected Host").into_response());
+    }
+    if headers.get(API_HEADER).and_then(|value| value.to_str().ok()) != Some("1") {
+        return Err((StatusCode::FORBIDDEN, "missing X-Aion2dps: 1").into_response());
+    }
+    Ok(())
+}
+
+/// `127.0.0.1`, `localhost` or `[::1]`, with any port. A request without a
+/// `Host` (HTTP/1.0 tools) is not a browser page and is let through.
+fn host_is_local(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(header::HOST) else { return true };
+    let Ok(host) = host.to_str() else { return false };
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host.split(':').next().unwrap_or("")
+    };
+    name == "127.0.0.1" || name.eq_ignore_ascii_case("localhost") || name == "::1"
 }
 
 /// `/` is the detailed meter. `/overlay` is the compact view, also handy as a
@@ -483,6 +525,27 @@ mod tests {
         let names = dir.join(crate::monster_names::FILE_NAME);
         let sessions = dir.join(sessions::FOLDER);
         (Arc::new(AppState::with_storage(Some(names), Some(sessions))), dir)
+    }
+
+    #[test]
+    fn api_reads_need_the_header_and_a_local_host() {
+        let with = |host: Option<&str>, key: Option<&str>| {
+            let mut h = HeaderMap::new();
+            if let Some(host) = host {
+                h.insert(header::HOST, host.parse().unwrap());
+            }
+            if let Some(key) = key {
+                h.insert(API_HEADER, key.parse().unwrap());
+            }
+            h
+        };
+        assert!(check_api("/api/live", &with(Some("127.0.0.1:18732"), Some("1"))).is_ok());
+        assert!(check_api("/api/live", &with(Some("localhost:18732"), Some("1"))).is_ok());
+        assert!(check_api("/api/live", &with(Some("[::1]:18732"), Some("1"))).is_ok());
+        assert!(check_api("/api/live", &with(Some("127.0.0.1:18732"), None)).is_err());
+        assert!(check_api("/api/sessions", &with(Some("evil.example:18732"), Some("1"))).is_err());
+        assert!(check_api("/overlay", &with(Some("127.0.0.1:18732"), None)).is_ok(), "pages stay open for browser sources");
+        assert!(check_api("/js/bridge.js", &with(None, None)).is_ok());
     }
 
     async fn text(response: Response) -> String {

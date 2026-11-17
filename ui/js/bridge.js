@@ -5,6 +5,9 @@
   const tauri = window.__TAURI__;
   const inApp = Boolean(tauri && tauri.core && tauri.event);
   const POLL_MS = 250;
+  // The server refuses every /api request without this header (reads too), so
+  // another web site open in the same browser cannot read or change anything.
+  const API = { 'x-aion2dps': '1' };
 
   function subscribe(render, onError) {
     const fail = onError || (() => {});
@@ -18,7 +21,7 @@
     }
     const tick = async () => {
       try {
-        const res = await fetch('/api/live', { cache: 'no-store' });
+        const res = await fetch('/api/live', { cache: 'no-store', headers: API });
         render(await res.json());
       } catch (err) {
         fail(err);
@@ -32,7 +35,7 @@
   const send = (method, path, body, extraHeaders) => fetch(path, {
     method,
     cache: 'no-store',
-    headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...extraHeaders },
+    headers: { ...API, ...(body ? { 'content-type': 'application/json' } : {}), ...extraHeaders },
     body: body ? JSON.stringify(body) : undefined,
   }).then(async (res) => {
     const text = await res.text();
@@ -42,8 +45,8 @@
   const post = (path, body, extraHeaders) => send('POST', path, body, extraHeaders);
   const get = (path) => send('GET', path);
 
-  // The server refuses saved-data writes without this header.
-  const WRITE = { 'x-aion2dps': '1' };
+  // Saved-data writes have always needed it; kept for clarity at call sites.
+  const WRITE = API;
 
   const sessionPath = (id) => `/api/sessions/${encodeURIComponent(id)}`;
 
@@ -59,7 +62,15 @@
   /** The browser downloads the server's file; the app writes the loaded session. */
   function exportSession(id, session) {
     if (!inApp) {
-      download(`${sessionPath(id)}/export`, `${id}.json`);
+      // A plain link cannot send the header, so fetch the file and save it.
+      fetch(`${sessionPath(id)}/export`, { cache: 'no-store', headers: API })
+        .then((res) => (res.ok ? res.blob() : Promise.reject(new Error(`HTTP ${res.status}`))))
+        .then((blob) => {
+          const href = URL.createObjectURL(blob);
+          download(href, `${id}.json`);
+          setTimeout(() => URL.revokeObjectURL(href), 10_000);
+        })
+        .catch(() => {});
       return;
     }
     const url = URL.createObjectURL(new Blob([JSON.stringify(session)], { type: 'application/json' }));
