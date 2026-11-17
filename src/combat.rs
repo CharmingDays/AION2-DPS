@@ -46,6 +46,13 @@ pub const BOSS: &str = "Boss";
 const PLAYER_ID_LIMIT: usize = 50_000;
 /// Summons waiting for their owner's name to be seen.
 const PENDING_OWNER_LIMIT: usize = 4_096;
+/// Entities with no packet for this long are forgotten (name, HP, links,
+/// player and summon marks) when a fight ends or the meter is idle.
+pub const ENTITY_TTL_MS: i64 = 60 * 60 * 1000;
+/// Below this many tracked entities nothing is forgotten.
+const ENTITY_PRUNE_FLOOR: usize = 1_024;
+/// Pruning runs at most this often.
+const ENTITY_PRUNE_EVERY_MS: i64 = 5 * 60 * 1000;
 /// Summon-to-owner links followed before giving up.
 const LINK_HOPS: usize = 16;
 /// Spawned entities whose monster type is kept. When full, only the ones
@@ -575,6 +582,11 @@ pub struct Combat {
     saved_starts: Vec<i64>,
     /// Sessions queued at fight end; written off the capture path.
     pending_auto_saves: Vec<Session>,
+    /// Last packet time per entity id, so long-gone entities can be pruned
+    /// from `names`, `hp`, `links`, `players`, `summons` and `pending_owners`.
+    seen: HashMap<i32, i64>,
+    /// When entity pruning last ran.
+    last_prune_ms: Option<i64>,
 }
 
 impl Default for Combat {
@@ -627,6 +639,8 @@ impl Combat {
             auto_save_after_boss: false,
             saved_starts: Vec::new(),
             pending_auto_saves: Vec::new(),
+            seen: HashMap::new(),
+            last_prune_ms: None,
         }
     }
 
@@ -942,6 +956,9 @@ impl Combat {
     pub fn tick(&mut self, now: i64) {
         self.expire_lock(now);
         let Some(idle) = self.idle_since() else {
+            if self.locked.is_none() {
+                self.maybe_prune_entities(now);
+            }
             return;
         };
         if now.saturating_sub(idle) >= self.idle_reset_ms() {
@@ -1143,6 +1160,7 @@ impl Combat {
     }
 
     fn apply_event(&mut self, event: Event, now: i64) {
+        self.note_seen(&event, now);
         match event {
             Event::Hit(hit) => self.apply_hit(&hit, now),
             Event::Link { summon, owner } => {
@@ -1655,6 +1673,121 @@ impl Combat {
         }
         self.archive(now);
         self.clear_fight();
+        self.maybe_prune_entities(now);
+    }
+
+    /// Prune long-unseen entities, at most every [`ENTITY_PRUNE_EVERY_MS`].
+    fn maybe_prune_entities(&mut self, now: i64) {
+        if self
+            .last_prune_ms
+            .is_some_and(|last| now.saturating_sub(last) < ENTITY_PRUNE_EVERY_MS && now >= last)
+        {
+            return;
+        }
+        self.last_prune_ms = Some(now);
+        self.prune_entities(now, ENTITY_TTL_MS, ENTITY_PRUNE_FLOOR);
+    }
+
+    /// Note every entity an event names as seen at `now`.
+    fn note_seen(&mut self, event: &Event, now: i64) {
+        let mut mark = |id: i32| {
+            self.seen.insert(id, now);
+        };
+        match event {
+            Event::Hit(hit) => {
+                mark(hit.actor);
+                mark(hit.target);
+            }
+            Event::Link { summon, owner } => {
+                mark(*summon);
+                mark(*owner);
+            }
+            Event::Name { id, .. }
+            | Event::You { id }
+            | Event::Hp { id, .. }
+            | Event::LiveHp { id, .. }
+            | Event::Removed { id, .. }
+            | Event::Spawn { id, .. }
+            | Event::Despawn { id }
+            | Event::Stagger { id, .. }
+            | Event::StaggerBreak { id } => mark(*id),
+            Event::SummonSpawn {
+                summon,
+                owner,
+                cast_owner,
+                ..
+            } => {
+                mark(*summon);
+                if let Some(owner) = owner {
+                    mark(*owner);
+                }
+                if let Some(owner) = cast_owner {
+                    mark(*owner);
+                }
+            }
+        }
+    }
+
+    /// Forget entities with no packet for `ttl_ms`, once more than `floor`
+    /// are tracked. Kept whatever their age: the local player, anything in
+    /// the open fight (targets and their actors), the last target, units in
+    /// the history list, and the owners (followed up the link chain) of
+    /// every kept entity, so a recent summon still lands on its player.
+    /// Entities never seen in a packet (no `seen` entry) are left alone.
+    /// Monster types (`spawn_types`) are not pruned here: they leave on
+    /// despawn and have their own cap, and dropping one could make a monster
+    /// look like a player. Returns how many entities were forgotten.
+    fn prune_entities(&mut self, now: i64, ttl_ms: i64, floor: usize) -> usize {
+        if self.seen.len() <= floor {
+            return 0;
+        }
+        let cutoff = now.saturating_sub(ttl_ms);
+        let mut keep: HashSet<i32> = self
+            .seen
+            .iter()
+            .filter(|(_, at)| **at >= cutoff)
+            .map(|(id, _)| *id)
+            .collect();
+        keep.extend(self.self_id);
+        keep.extend(self.you_streak.map(|(id, _)| id));
+        keep.extend(self.last_target);
+        keep.extend(self.released);
+        keep.extend(self.pinned);
+        for (id, target) in &self.targets {
+            keep.insert(*id);
+            keep.extend(target.actors.keys().copied());
+        }
+        keep.extend(self.history.iter().map(|row| row.id));
+        let roots: Vec<i32> = keep.iter().copied().collect();
+        for id in roots {
+            let mut current = id;
+            for _ in 0..LINK_HOPS {
+                match self.links.get(&current) {
+                    Some(&next) if next != id => {
+                        keep.insert(next);
+                        current = next;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        let stale: HashSet<i32> = self
+            .seen
+            .keys()
+            .filter(|id| !keep.contains(id))
+            .copied()
+            .collect();
+        if stale.is_empty() {
+            return 0;
+        }
+        self.names.retain(|id, _| !stale.contains(id));
+        self.hp.retain(|id, _| !stale.contains(id));
+        self.links.retain(|summon, _| !stale.contains(summon));
+        self.pending_owners.retain(|summon, _| !stale.contains(summon));
+        self.players.retain(|id| !stale.contains(id));
+        self.summons.retain(|id| !stale.contains(id));
+        self.seen.retain(|id, _| !stale.contains(id));
+        stale.len()
     }
 
     fn archive(&mut self, now: i64) {
@@ -4152,5 +4285,91 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert!(saved[0].target.boss);
         assert!(!saved[0].target.defeated);
+    }
+
+    const HOUR: i64 = 60 * 60 * 1000;
+
+    #[test]
+    fn long_unseen_entities_are_pruned_but_recent_and_needed_ones_stay() {
+        let mut combat = Combat::new();
+        // The local player, a party member and a stranger, all seen at 0.
+        combat.apply(Event::You { id: 1 }, 0);
+        combat.apply(Event::You { id: 1 }, 0);
+        combat.apply(Event::You { id: 1 }, 0);
+        combat.apply(name(1, "Me", true), 0);
+        combat.apply(name(2, "Friend", true), 0);
+        combat.apply(name(3, "Stranger", true), 0);
+        combat.apply(Event::Hp { id: 3, current: 10, max: 10 }, 0);
+        // A summon whose owner went quiet long ago, but the summon is recent.
+        combat.apply(name(4, "Owner", true), 0);
+        combat.apply(Event::Link { summon: 40, owner: 4 }, 0);
+        // A stale summon of a stale owner.
+        combat.apply(name(5, "Gone", true), 0);
+        combat.apply(Event::Link { summon: 50, owner: 5 }, 0);
+        // Later: the friend fights, the recent summon acts.
+        combat.apply(Event::Hp { id: 2, current: 5, max: 10 }, 2 * HOUR);
+        combat.apply(Event::Hp { id: 40, current: 5, max: 10 }, 2 * HOUR);
+
+        let pruned = combat.prune_entities(2 * HOUR, ENTITY_TTL_MS, 0);
+        assert_eq!(pruned, 3, "the stranger, the stale owner and its summon");
+        assert_eq!(combat.display_name(1).as_deref(), Some("Me"), "the local player always stays");
+        assert_eq!(combat.display_name(2).as_deref(), Some("Friend"));
+        assert_eq!(combat.display_name(40).as_deref(), Some("Owner"), "a recent summon keeps its owner");
+        assert_eq!(combat.links.get(&40), Some(&4));
+        assert_eq!(combat.display_name(3), None);
+        assert!(!combat.hp.contains_key(&3));
+        assert!(!combat.links.contains_key(&50));
+        assert_eq!(combat.display_name(5), None);
+        assert!(!combat.seen.contains_key(&3));
+    }
+
+    #[test]
+    fn pruning_keeps_the_open_fight_and_history_and_respects_the_floor() {
+        let mut combat = Combat::new();
+        combat.apply(name(7, "Old fighter", true), 0);
+        combat.apply(name(8, "Bystander", true), 0);
+        // Under the floor: nothing goes, however old.
+        assert_eq!(combat.prune_entities(3 * HOUR, ENTITY_TTL_MS, 100), 0);
+        assert!(combat.knows_name(8));
+        // An actor in the open fight stays even if its last packet is old.
+        combat.apply_hit(&hit(7, 900, 100, 10), 3 * HOUR);
+        combat.seen.insert(7, 0);
+        assert_eq!(combat.prune_entities(3 * HOUR, ENTITY_TTL_MS, 0), 1);
+        assert!(combat.knows_name(7));
+        assert!(!combat.knows_name(8));
+        // A unit in the history list keeps its record for name backfill.
+        combat.apply(name(901, "Archived", true), 3 * HOUR);
+        combat.history.push_front(UnitHistory {
+            ended_ms: 3 * HOUR,
+            id: 901,
+            name: MONSTER.into(),
+            damage: 1,
+            dps: 0,
+            duration_ms: 1,
+            monster_type: None,
+        });
+        combat.clear_fight();
+        assert_eq!(combat.prune_entities(9 * HOUR, ENTITY_TTL_MS, 0), 1, "7 goes, 901 stays");
+        assert!(combat.knows_name(901));
+        assert!(!combat.knows_name(7));
+    }
+
+    #[test]
+    fn idle_ticks_prune_at_most_every_few_minutes() {
+        let mut combat = Combat::new();
+        for id in 0..(ENTITY_PRUNE_FLOOR as i32 + 10) {
+            combat.apply(Event::Hp { id: 10_000 + id, current: 1, max: 1 }, 0);
+        }
+        combat.tick(2 * HOUR);
+        assert!(combat.hp.is_empty(), "all were unseen for over an hour");
+        assert_eq!(combat.last_prune_ms, Some(2 * HOUR));
+        // Old entries again, but the last prune was a minute ago.
+        for id in 0..(ENTITY_PRUNE_FLOOR as i32 + 10) {
+            combat.apply(Event::Hp { id: 20_000 + id, current: 1, max: 1 }, 0);
+        }
+        combat.tick(2 * HOUR + 60_000);
+        assert!(!combat.hp.is_empty(), "rate limited");
+        combat.tick(2 * HOUR + ENTITY_PRUNE_EVERY_MS);
+        assert!(combat.hp.is_empty());
     }
 }
