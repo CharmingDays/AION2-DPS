@@ -33,6 +33,14 @@ use tauri::{AppHandle, Emitter, Manager};
 const REPO: &str = "CharmingDays/aion-tallymark";
 const LATEST: &str = "https://api.github.com/repos/CharmingDays/aion-tallymark/releases/latest";
 const SUMS: &str = "SHA256SUMS.txt";
+/// Every release file (installer, SHA256SUMS.txt) must start with this.
+const DOWNLOAD_PREFIX: &str = "https://github.com/CharmingDays/aion-tallymark/releases/download/";
+/// Hosts a release download may end up on after GitHub's redirects.
+const DOWNLOAD_HOSTS: [&str; 3] = [
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
 /// A check is reused for this long unless the button asks again.
 const CACHE: Duration = Duration::from_secs(30 * 60);
 /// First automatic check, after the windows are up.
@@ -130,14 +138,16 @@ fn agent(current: &str) -> String {
     format!("User-Agent: aion2dps/{current} (+https://github.com/{REPO})")
 }
 
-/// GET `url` into memory; the body and the HTTP status.
-fn fetch(url: &str, current: &str, limit: u64) -> Result<(Vec<u8>, u32), String> {
+/// GET `url` into memory; the body, the HTTP status and the URL it ended
+/// on after redirects.
+fn fetch(url: &str, current: &str, limit: u64) -> Result<(Vec<u8>, u32, String), String> {
     let out = curl()
-        .args(["-sSL", "--proto", "=https", "--max-time", "20", "--max-filesize"])
+        .args(["-sSL", "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "5"])
+        .args(["--max-time", "20", "--max-filesize"])
         .arg(limit.to_string())
         .args(["-H", "Accept: application/vnd.github+json", "-H"])
         .arg(agent(current))
-        .args(["-w", "\n%{http_code}"])
+        .args(["-w", "\n%{http_code} %{url_effective}"])
         .arg(url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -145,19 +155,46 @@ fn fetch(url: &str, current: &str, limit: u64) -> Result<(Vec<u8>, u32), String>
         .map_err(|err| format!("could not run curl.exe: {err}"))?;
     let mut body = out.stdout;
     let cut = body.iter().rposition(|b| *b == b'\n').unwrap_or(0);
-    let status = String::from_utf8_lossy(&body[cut..]).trim().parse::<u32>().unwrap_or(0);
+    let tail = String::from_utf8_lossy(&body[cut..]).trim().to_string();
+    let (code, effective) = tail.split_once(' ').unwrap_or((tail.as_str(), ""));
+    let status = code.parse::<u32>().unwrap_or(0);
+    let effective = effective.trim().to_string();
     body.truncate(cut);
     if !out.status.success() || status == 0 {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         tracing::warn!(target: "update", "request to {url} failed: {err}");
         return Err("Could not reach GitHub. Check your internet connection and try again.".into());
     }
-    Ok((body, status))
+    Ok((body, status, effective))
+}
+
+/// The host of an `https://` URL, lowercased; `None` for any other scheme
+/// or a URL with user info or a port.
+fn https_host(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    if authority.is_empty() || authority.contains(['@', ':', '\\']) {
+        return None;
+    }
+    Some(authority.to_ascii_lowercase())
+}
+
+/// A release file of this repository on github.com, over https.
+fn is_release_download(url: &str) -> bool {
+    url.starts_with(DOWNLOAD_PREFIX)
+        && url.len() > DOWNLOAD_PREFIX.len()
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+        && https_host(url).as_deref() == Some("github.com")
+}
+
+/// Where a release download may land after redirects: GitHub's own hosts.
+fn is_allowed_download_host(url: &str) -> bool {
+    https_host(url).is_some_and(|host| DOWNLOAD_HOSTS.contains(&host.as_str()))
 }
 
 fn ask_github(current: &str) -> Result<Release, String> {
     tracing::info!(target: "update", "checking {LATEST} (current {current})");
-    let (body, status) = fetch(LATEST, current, 2 * 1024 * 1024)?;
+    let (body, status, _) = fetch(LATEST, current, 2 * 1024 * 1024)?;
     match status {
         200 => {}
         403 | 429 => {
@@ -324,14 +361,16 @@ fn sha256(path: &Path) -> io::Result<String> {
 fn download(app: &AppHandle, url: &str, to: &Path, total: u64, current: &str) -> Result<(), String> {
     let _ = fs::remove_file(to);
     let mut child = curl()
-        .args(["-sSfL", "--proto", "=https", "--max-time", "900", "--max-filesize"])
+        .args(["-sSfL", "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "5"])
+        .args(["--max-time", "900", "--max-filesize"])
         .arg(MAX_SETUP.to_string())
         .arg("-H")
         .arg(agent(current))
+        .args(["-w", "%{url_effective}"])
         .arg("-o")
         .arg(to)
         .arg(url)
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("could not run curl.exe: {err}"))?;
@@ -351,6 +390,15 @@ fn download(app: &AppHandle, url: &str, to: &Path, total: u64, current: &str) ->
         tracing::warn!(target: "update", "download of {url} failed: {}", err.trim());
         let _ = fs::remove_file(to);
         return Err("The download failed. Check your connection and try again.".into());
+    }
+    let mut effective = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut effective);
+    }
+    if !is_allowed_download_host(effective.trim()) {
+        tracing::warn!(target: "update", "download of {url} ended on {}, not a GitHub host", effective.trim());
+        let _ = fs::remove_file(to);
+        return Err("The installer download was sent somewhere other than GitHub, so it was deleted and not run.".into());
     }
     let done = fs::metadata(to).map(|m| m.len()).unwrap_or(0);
     emit(app, "download", done, total.max(done));
@@ -406,17 +454,29 @@ fn install_inner(app: &AppHandle, version: &str) -> Result<(), String> {
     if !installed() {
         return Err("This is the portable exe, which the installer would not replace. Download the new one from the release page.".into());
     }
-    if release.setup_url.is_empty() || !release.setup_url.starts_with("https://github.com/") {
+    if release.setup_url.is_empty() {
         return Err("This release has no Windows installer to download. Get it from the release page.".into());
+    }
+    if !is_release_download(&release.setup_url) {
+        tracing::warn!(target: "update", "installer link {} is not a GitHub release download", release.setup_url);
+        return Err("The installer link in this release is not a GitHub release download, so the update was stopped. Get it from the release page.".into());
     }
     let sums_url = release
         .sums_url
         .as_deref()
         .ok_or("This release has no SHA256SUMS.txt, so the installer can't be checked. Get it from the release page.")?;
+    if !is_release_download(sums_url) {
+        tracing::warn!(target: "update", "SHA256SUMS.txt link {sums_url} is not a GitHub release download");
+        return Err("The SHA256SUMS.txt link in this release is not a GitHub release download, so the update was stopped. Get it from the release page.".into());
+    }
     let current = check.current.clone();
 
     emit(app, "sums", 0, 0);
-    let (sums, status) = fetch(sums_url, &current, 64 * 1024)?;
+    let (sums, status, landed) = fetch(sums_url, &current, 64 * 1024)?;
+    if !is_allowed_download_host(&landed) {
+        tracing::warn!(target: "update", "SHA256SUMS.txt from {sums_url} ended on {landed}, not a GitHub host");
+        return Err("SHA256SUMS.txt was sent somewhere other than GitHub, so the update was stopped. Get it from the release page.".into());
+    }
     if status != 200 {
         return Err(format!("Could not get SHA256SUMS.txt (HTTP {status})."));
     }
@@ -493,6 +553,40 @@ mod tests {
         assert!(!is_newer("0.2.9", "0.3.0"));
         assert!(!is_newer("0.4.0-rc.1", "0.4.0"));
         assert!(!is_newer("nonsense", "0.3.0"));
+    }
+
+    #[test]
+    fn only_github_release_downloads_are_accepted() {
+        let ok = "https://github.com/CharmingDays/aion-tallymark/releases/download/v0.3.12/SHA256SUMS.txt";
+        assert!(is_release_download(ok));
+        for bad in [
+            "http://github.com/CharmingDays/aion-tallymark/releases/download/v0.3.12/SHA256SUMS.txt",
+            "https://github.com.evil.example/CharmingDays/aion-tallymark/releases/download/x",
+            "https://evil.example/CharmingDays/aion-tallymark/releases/download/x",
+            "https://github.com/someone/else/releases/download/v1/SHA256SUMS.txt",
+            "https://github.com/CharmingDays/aion-tallymark/releases/download/",
+            "https://github.com/CharmingDays/aion-tallymark/releases/download/v1/a b",
+            "",
+        ] {
+            assert!(!is_release_download(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn redirects_must_stay_on_github_hosts() {
+        assert!(is_allowed_download_host("https://release-assets.githubusercontent.com/github-production-release-asset/1/2?x=y"));
+        assert!(is_allowed_download_host("https://objects.githubusercontent.com/a"));
+        assert!(is_allowed_download_host("https://github.com/CharmingDays/aion-tallymark/releases/download/v1/x"));
+        for bad in [
+            "",
+            "http://objects.githubusercontent.com/a",
+            "https://objects.githubusercontent.com.evil.example/a",
+            "https://user@objects.githubusercontent.com/a",
+            "https://objects.githubusercontent.com:8443/a",
+            "https://evil.example/?https://github.com/",
+        ] {
+            assert!(!is_allowed_download_host(bad), "{bad}");
+        }
     }
 
     #[test]
