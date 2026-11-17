@@ -817,6 +817,37 @@ fn cube_origin(app: &AppHandle) -> (f64, f64) {
     cube_place(app).1
 }
 
+/// Waits between attempts to open the hidden-cube window after the first fails.
+const CUBE_RETRY_WAITS: [Duration; 4] =
+    [Duration::from_secs(1), Duration::from_secs(3), Duration::from_secs(10), Duration::from_secs(30)];
+
+/// Build the hidden-cube window, retrying in the background with growing waits
+/// if WebView2 is not ready yet (seen right after login or an update).
+fn open_cube_window(app: &AppHandle) {
+    let Err(err) = build_cube_window(app) else { return };
+    tracing::warn!(target: "cube", "cube alert window did not open: {err}; retrying");
+    let app = app.clone();
+    let spawned = thread::Builder::new().name("cube-window-retry".into()).spawn(move || {
+        for (attempt, wait) in CUBE_RETRY_WAITS.iter().enumerate() {
+            thread::sleep(*wait);
+            if app.get_webview_window(CUBE).is_some() {
+                return;
+            }
+            match build_cube_window(&app) {
+                Ok(()) => {
+                    tracing::info!(target: "cube", attempt = attempt + 2, "cube alert window opened");
+                    return;
+                }
+                Err(err) => tracing::warn!(target: "cube", attempt = attempt + 2, "cube alert window did not open: {err}"),
+            }
+        }
+        tracing::warn!(target: "cube", "cube alert window is unavailable; hidden cube toasts will not show this run");
+    });
+    if let Err(err) = spawned {
+        tracing::warn!(target: "cube", "could not start the cube window retry: {err}");
+    }
+}
+
 /// Hidden top-center window for the hidden-cube alert; the page shows it.
 fn build_cube_window(app: &AppHandle) -> tauri::Result<()> {
     let (x, y) = cube_origin(app);
@@ -1283,39 +1314,37 @@ fn main() {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let port = runtime
-        .block_on(web::serve(state.clone(), args.port))
-        .unwrap_or_else(|err| {
-            eprintln!("could not listen on 127.0.0.1:{} ({err})", args.port);
-            std::process::exit(1);
-        });
+    // Bound before Tauri starts, but a failure is only fatal once the
+    // single-instance check in `.build()` has passed: a second launch finds
+    // the port taken because the first copy is running, and hands over to it
+    // (which shows the overlay) instead of failing.
+    let served = runtime.block_on(web::serve(state.clone(), args.port));
+    let port = served.as_ref().copied().unwrap_or(args.port);
+    let wanted_port = args.port;
 
     let dashboard = format!("http://127.0.0.1:{port}/");
-    println!("detailed meter  {dashboard}");
-    if !args.no_overlay {
-        println!("overlay window  this app");
-    }
-    println!("packets only - this program does not read game memory");
-
-    if args.demo {
-        if target_debug::requested(args.debug_targets) {
-            println!("target debug    off in --demo (no packets to log)");
-        }
-        demo::start(state.clone());
-    } else {
-        let debug = open_target_debug(&state, args.debug_targets);
-        capture::start(state.clone(), debug);
-    }
-    if args.browser {
-        open_browser(&dashboard);
-    }
+    let (demo_mode, debug_targets, browser) = (args.demo, args.debug_targets, args.browser);
 
     let windowless = args.windowless();
     let no_overlay = args.no_overlay;
     // "Start in tray" (Config > General) keeps a normal launch in the tray too.
     // Not in --demo, where the sample overlay is the point.
     let start_hidden = args.start_hidden || (state.start_in_tray() && !args.demo && !no_overlay);
-    let app = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    if !args.demo {
+        // Must be the first plugin. Launching aion2dps again (Start menu,
+        // desktop shortcut) while it runs in the tray shows the running
+        // copy's overlay; the new process exits before opening capture.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            let autostart = argv.iter().any(|a| a == "--start-hidden");
+            tracing::info!(target: "overlay", autostart, "aion2dps was launched again; handing over to this copy");
+            if !autostart {
+                let _ = app.emit("tray-show", ());
+            }
+        }));
+    }
+    let dashboard_for_setup = dashboard.clone();
+    let app = builder
         .manage(state.clone())
         .manage(Dashboard(dashboard))
         .manage(Toasts::default())
@@ -1412,6 +1441,33 @@ fn main() {
         })
         .setup(move |app| {
             let handle = app.handle().clone();
+            // Plugins are set up before this, so another running copy has
+            // already taken over; anything holding the port now is not us.
+            let port = match served {
+                Ok(port) => port,
+                Err(err) => {
+                    eprintln!("could not listen on 127.0.0.1:{wanted_port} ({err})");
+                    tracing::error!("could not listen on 127.0.0.1:{wanted_port}: {err}");
+                    std::process::exit(1);
+                }
+            };
+            println!("detailed meter  http://127.0.0.1:{port}/");
+            if !no_overlay {
+                println!("overlay window  this app");
+            }
+            println!("packets only - this program does not read game memory");
+            if demo_mode {
+                if target_debug::requested(debug_targets) {
+                    println!("target debug    off in --demo (no packets to log)");
+                }
+                demo::start(state.clone());
+            } else {
+                let debug = open_target_debug(&state, debug_targets);
+                capture::start(state.clone(), debug);
+            }
+            if browser {
+                open_browser(&dashboard_for_setup);
+            }
             if start_hidden {
                 // No window is built yet, so nothing flashes on screen.
                 tray_watch::hide_to_tray(&handle)?;
@@ -1435,9 +1491,7 @@ fn main() {
                 // After the tray-show listener, so an early failure is not missed.
                 reveal_on_capture_failure(handle.clone(), state.clone());
             }
-            if let Err(err) = build_cube_window(&handle) {
-                tracing::warn!("cube alert window is unavailable: {err}");
-            }
+            open_cube_window(&handle);
             tray_watch::start_watcher(handle.clone(), state.clone());
             updater::start_background(handle.clone());
             push_snapshots(handle, state, windowless);
