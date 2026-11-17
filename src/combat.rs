@@ -443,7 +443,7 @@ pub struct SettingsView {
     pub check_updates_automatically: bool,
     /// AppState-owned: event toasts only while AION 2 is running. Default off.
     pub toasts_only_when_aion2: bool,
-    /// AppState-owned: auto-save a session when a boss fight ends. Default off.
+    /// AppState-owned: auto-save a session when a boss dies, or when a boss fight times out. Default off.
     pub auto_save_after_boss: bool,
     /// AppState-owned passive cube alert preference.
     pub hidden_cube_alerts: bool,
@@ -794,13 +794,10 @@ impl Combat {
     }
 
     /// The frozen fight goes to history like any finished fight.
+    /// Auto-save already ran at death, when the lock began.
     fn release(&mut self, lock: Box<Lock>) {
-        let mut view = lock.view;
+        let view = lock.view;
         let end = view.last_ms.unwrap_or(lock.died_ms);
-        if let Some(session) = view.fight_session_as_boss(end) {
-            let qualifies = Self::qualifies_auto_save(&session, &view);
-            self.push_auto_save(session, qualifies);
-        }
         let rows = view.archive_rows(end);
         self.push_history(rows);
     }
@@ -823,6 +820,12 @@ impl Combat {
         view.saved_starts.clear();
         view.pinned = Some(boss);
         view.reset_after_ms = i64::MAX / 4;
+        // Auto-save the frozen fight at death, not when the lock later ends.
+        let end = view.last_ms.unwrap_or(died_ms);
+        if let Some(session) = view.fight_session_as_boss(end) {
+            let qualifies = Self::qualifies_auto_save(&session, &view);
+            self.push_auto_save(session, qualifies);
+        }
         self.clear_fight();
         self.locked = Some(Box::new(Lock {
             view: Box::new(view),
@@ -4245,19 +4248,19 @@ mod tests {
     }
 
     #[test]
-    fn auto_save_queues_a_boss_fight_once_when_the_lock_ends() {
+    fn auto_save_queues_a_boss_fight_once_when_the_boss_dies() {
         let mut combat = spawned();
         combat.set_auto_save_after_boss(true);
         long_threshold_boss(&mut combat, 1_000);
         combat.apply(Event::LiveHp { id: BOSS_ID, hp: 0 }, 14_000);
         assert!(combat.is_locked());
-        assert!(combat.take_pending_auto_saves().is_empty(), "wait until the lock ends");
-        combat.tick(14_000 + 10_000);
         let saved = combat.take_pending_auto_saves();
         assert_eq!(saved.len(), 1);
         assert!(saved[0].target.boss && saved[0].target.defeated);
         assert_eq!(saved[0].totals.total_damage, 1_680_000);
         assert!(saved[0].duration_ms >= MIN_AUTO_SAVE_MS);
+        combat.unlock();
+        assert!(combat.take_pending_auto_saves().is_empty(), "ending the lock early does not save it again");
         combat.tick(14_000 + 10_000);
         assert!(combat.take_pending_auto_saves().is_empty(), "the same fight is not saved twice");
     }
@@ -4267,9 +4270,10 @@ mod tests {
         let mut combat = spawned();
         combat.set_auto_save_after_boss(true);
         long_threshold_boss(&mut combat, 1_000);
-        combat.apply(Event::LiveHp { id: BOSS_ID, hp: 0 }, 14_000);
-        let session = combat.session(14_000).unwrap();
+        let session = combat.session(13_000).unwrap();
         combat.note_session_saved(session.started_at);
+        combat.apply(Event::LiveHp { id: BOSS_ID, hp: 0 }, 14_000);
+        assert!(combat.take_pending_auto_saves().is_empty());
         combat.unlock();
         assert!(combat.take_pending_auto_saves().is_empty());
     }

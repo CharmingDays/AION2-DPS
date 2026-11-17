@@ -132,7 +132,7 @@ pub struct AppState {
     check_updates_automatically: AtomicBool,
     /// Config: event notification toasts only while AION 2 is running. Default off.
     toasts_only_when_aion2: AtomicBool,
-    /// Config: auto-save a session when a boss fight ends. Default off.
+    /// Config: auto-save a session when a boss dies, or when a boss fight times out. Default off.
     auto_save_after_boss: AtomicBool,
     /// Last version we emitted `update-available` for (saved; no repeat notify).
     update_last_notified: Mutex<Option<String>>,
