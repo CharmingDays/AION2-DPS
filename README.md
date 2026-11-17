@@ -64,7 +64,8 @@ Get the files from the Releases page.
 ## Usage
 
 - Start the game, then start the app as Administrator. Start it before a boss spawns so names and bosses are recognised.
-- The **overlay** opens first. Drag to move, resize from the edges, `-`/`+` for opacity. Left-click the close button to hide to the tray, or to quit if **Minimize to tray when overlay is closed** is off in Config > General. Right-click it to quit.
+- aion2dps starts in the system tray (**Start in tray** in Config > General, on by default). Click the tray icon, or right-click it and pick Show overlay, to open the overlay. If packet capture fails at launch (for example Npcap is missing or needs admin), the overlay opens by itself so you see the notice. Turn the setting off to open the overlay at launch instead.
+- The **overlay** opens from the tray (or at launch with Start in tray off). Drag to move, resize from the edges, `-`/`+` for opacity. Left-click the close button to hide to the tray, or to quit if **Minimize to tray when overlay is closed** is off in Config > General. Right-click it to quit.
 - Open the **detailed meter** from the overlay's hover buttons, or browse to `http://127.0.0.1:18732/` (`/overlay` gives the compact view, handy as a stream browser source; `/history` gives session history).
 - **Demo mode**: `aion2dps.exe --demo` shows sample combat with no game or Npcap needed.
 

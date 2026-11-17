@@ -234,6 +234,7 @@
       case 'toasts_only_when_aion2': return bridge.setToastsOnlyWhenAion2(v);
       case 'auto_save_after_boss': return bridge.setAutoSaveAfterBoss(v);
       case 'minimize_to_tray': return bridge.setMinimizeToTray(v);
+      case 'start_in_tray': return bridge.setStartInTray(v);
       case 'start_with_windows': return bridge.setStartWithWindows(v);
       case 'pop_up_on_boss': return bridge.setPopUpOnBoss(v);
       case 'check_updates_automatically': return bridge.setCheckUpdatesAutomatically(v);

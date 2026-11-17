@@ -114,6 +114,9 @@
     setMinimizeToTray: (on) => (inApp
       ? tauri.core.invoke('set_minimize_to_tray', { on })
       : post('/api/settings', { minimize_to_tray: on })),
+    setStartInTray: (on) => (inApp
+      ? tauri.core.invoke('set_start_in_tray', { on })
+      : post('/api/settings', { start_in_tray: on })),
     setStartWithWindows: (on) => tauri.core.invoke('set_start_with_windows', { on }),
     setPopUpOnBoss: (on) => tauri.core.invoke('set_pop_up_on_boss', { on }),
     setCheckUpdatesAutomatically: (on) => tauri.core.invoke('set_check_updates_automatically', { on }),

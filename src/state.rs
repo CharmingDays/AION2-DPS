@@ -120,6 +120,9 @@ pub struct AppState {
     /// When on, closing the overlay hides the app to the tray. When off, it
     /// quits. Desktop shell only; combat ignores it.
     minimize_to_tray: AtomicBool,
+    /// When on, the app starts hidden in the tray instead of opening the
+    /// overlay. Desktop shell only; combat ignores it.
+    start_in_tray: AtomicBool,
     start_with_windows: AtomicBool,
     pop_up_on_boss: AtomicBool,
     /// When on, the overlay body lets clicks through to the game; the top bar
@@ -226,6 +229,7 @@ impl AppState {
             capture: Mutex::new(CaptureInfo::default()),
             open_when_aion2: AtomicBool::new(stored.open_when_aion2),
             minimize_to_tray: AtomicBool::new(stored.minimize_to_tray),
+            start_in_tray: AtomicBool::new(stored.start_in_tray),
             start_with_windows: AtomicBool::new(stored.start_with_windows),
             pop_up_on_boss: AtomicBool::new(stored.pop_up_on_boss),
             overlay_click_through: AtomicBool::new(stored.overlay_click_through),
@@ -409,6 +413,7 @@ impl AppState {
         };
         settings.open_when_aion2 = self.open_when_aion2();
         settings.minimize_to_tray = self.minimize_to_tray();
+        settings.start_in_tray = self.start_in_tray();
         settings.start_with_windows = self.start_with_windows();
         settings.pop_up_on_boss = self.pop_up_on_boss();
         settings.overlay_click_through = self.overlay_click_through();
@@ -531,6 +536,17 @@ impl AppState {
     /// Persist overlay close-to-tray. Default is on.
     pub fn set_minimize_to_tray(&self, on: bool) {
         self.minimize_to_tray.store(on, Ordering::Relaxed);
+        self.store_settings();
+    }
+
+    /// Whether launching the app keeps it in the tray (no overlay at start).
+    pub fn start_in_tray(&self) -> bool {
+        self.start_in_tray.load(Ordering::Relaxed)
+    }
+
+    /// Persist start-in-tray. Default is on.
+    pub fn set_start_in_tray(&self, on: bool) {
+        self.start_in_tray.store(on, Ordering::Relaxed);
         self.store_settings();
     }
 
@@ -763,6 +779,7 @@ impl AppState {
             boss_engage_lock: view.boss_engage_lock,
             open_when_aion2: self.open_when_aion2(),
             minimize_to_tray: self.minimize_to_tray(),
+            start_in_tray: self.start_in_tray(),
             start_with_windows: self.start_with_windows(),
             pop_up_on_boss: self.pop_up_on_boss(),
             overlay_click_through: self.overlay_click_through(),
@@ -806,6 +823,8 @@ struct StoredSettings {
     open_when_aion2: bool,
     /// Default on: closing the overlay hides to the tray.
     minimize_to_tray: bool,
+    /// Default on: launching the app keeps it in the tray, no overlay.
+    start_in_tray: bool,
     start_with_windows: bool,
     pop_up_on_boss: bool,
     /// Default on: overlay body is click-through.
@@ -847,6 +866,7 @@ impl Default for StoredSettings {
             boss_engage_lock: true,
             open_when_aion2: false,
             minimize_to_tray: true,
+            start_in_tray: true,
             start_with_windows: false,
             pop_up_on_boss: true,
             overlay_click_through: true,
@@ -876,6 +896,7 @@ impl From<SettingsView> for StoredSettings {
             boss_engage_lock: view.boss_engage_lock,
             open_when_aion2: view.open_when_aion2,
             minimize_to_tray: view.minimize_to_tray,
+            start_in_tray: view.start_in_tray,
             start_with_windows: view.start_with_windows,
             pop_up_on_boss: view.pop_up_on_boss,
             overlay_click_through: view.overlay_click_through,
@@ -975,6 +996,7 @@ mod tests {
         assert_eq!(stored.boss_damage_threshold, DEFAULT_BOSS_DAMAGE);
         assert!(!stored.open_when_aion2);
         assert!(stored.minimize_to_tray);
+        assert!(stored.start_in_tray);
         assert!(!stored.start_with_windows);
         assert!(stored.pop_up_on_boss);
         assert!(stored.overlay_click_through);
@@ -1138,6 +1160,18 @@ mod tests {
         assert!(!state.minimize_to_tray(), "saving the reset delay must keep close-to-tray");
         state.set_minimize_to_tray(true);
         assert!(state.minimize_to_tray());
+    }
+
+    #[test]
+    fn start_in_tray_defaults_on_and_survives_other_saves() {
+        let state = AppState::with_storage(None, None);
+        assert!(state.start_in_tray());
+        assert!(state.live(0).settings.start_in_tray);
+        state.set_start_in_tray(false);
+        assert!(!state.start_in_tray());
+        assert!(!state.live(0).settings.start_in_tray);
+        assert!(state.set_reset_after_secs(40));
+        assert!(!state.start_in_tray(), "saving the reset delay must keep start-in-tray");
     }
 
     #[test]

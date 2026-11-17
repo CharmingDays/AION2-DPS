@@ -7,6 +7,10 @@
 //! (no game interaction) shows the overlay again when `AION2.exe` starts, if
 //! "Open automatically when Aion 2 is detected" is on.
 //!
+//! With "Start in tray" on (the default), launching the app only adds the
+//! tray icon; the overlay opens from the tray, or by itself if packet
+//! capture fails at launch so the Npcap or admin notice is seen.
+//!
 //! Event alerts fire in the meter and overlay pages and are shown in a small
 //! toast window over the game: the top center of the primary monitor unless
 //! Config > Toasts & pop-ups puts that kind elsewhere (one window per place).
@@ -71,6 +75,9 @@ const OVERLAY_MIN: (f64, f64) = aion2dps::overlay_layout::MIN_SIZE;
 const OVERLAY_SAVE_DELAY: Duration = Duration::from_millis(500);
 /// How often a combat snapshot is pushed to the windows as a `live` event.
 const PUSH_EVERY: Duration = Duration::from_millis(200);
+/// Started in the tray: how long to watch capture opening (the Npcap
+/// admin-only prompt may be on screen) for a failure worth showing.
+const START_CAPTURE_WATCH: Duration = Duration::from_secs(120);
 
 struct Args {
     port: u16,
@@ -192,6 +199,11 @@ fn set_auto_save_after_boss(state: State<'_, Arc<AppState>>, on: bool) {
 #[tauri::command]
 fn set_minimize_to_tray(state: State<'_, Arc<AppState>>, on: bool) {
     state.set_minimize_to_tray(on);
+}
+
+#[tauri::command]
+fn set_start_in_tray(state: State<'_, Arc<AppState>>, on: bool) {
+    state.set_start_in_tray(on);
 }
 
 #[tauri::command]
@@ -968,6 +980,37 @@ fn reveal_overlay(app: &AppHandle, quiet: bool) {
     watch_overlay(app.clone());
 }
 
+/// Started in the tray: open the overlay anyway if packet capture fails at
+/// launch, so the Npcap / admin notice it shows is not missed. Stops once
+/// capture is open, the user already showed the overlay, or after
+/// START_CAPTURE_WATCH.
+fn reveal_on_capture_failure(app: AppHandle, state: Arc<AppState>) {
+    let spawned = thread::Builder::new()
+        .name("aion2dps-start-watch".into())
+        .spawn(move || {
+            let deadline = Instant::now() + START_CAPTURE_WATCH;
+            while Instant::now() < deadline {
+                if !app.state::<tray_watch::TrayWatch>().waiting() {
+                    return;
+                }
+                let (opening, running, failed) =
+                    state.with_capture(|c| (c.opening, c.running, c.error.is_some() || c.npcap_admin_only));
+                if failed && !running {
+                    tracing::info!(target: "overlay", "capture failed at launch; showing the overlay from the tray");
+                    let _ = app.emit("tray-show", ());
+                    return;
+                }
+                if running && !opening {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
+        });
+    if let Err(err) = spawned {
+        tracing::warn!("could not watch capture at launch: {err}");
+    }
+}
+
 /// One fresh snapshot to the window `label` (hidden windows get none).
 fn send_live(app: &AppHandle, label: &str) {
     let live = app.state::<Arc<AppState>>().live(now_ms());
@@ -1269,7 +1312,9 @@ fn main() {
 
     let windowless = args.windowless();
     let no_overlay = args.no_overlay;
-    let start_hidden = args.start_hidden;
+    // "Start in tray" (Config > General) keeps a normal launch in the tray too.
+    // Not in --demo, where the sample overlay is the point.
+    let start_hidden = args.start_hidden || (state.start_in_tray() && !args.demo && !no_overlay);
     let app = tauri::Builder::default()
         .manage(state.clone())
         .manage(Dashboard(dashboard))
@@ -1291,6 +1336,7 @@ fn main() {
             set_toasts_only_when_aion2,
             set_auto_save_after_boss,
             set_minimize_to_tray,
+            set_start_in_tray,
             set_start_with_windows,
             set_pop_up_on_boss,
             set_check_updates_automatically,
@@ -1367,6 +1413,7 @@ fn main() {
         .setup(move |app| {
             let handle = app.handle().clone();
             if start_hidden {
+                // No window is built yet, so nothing flashes on screen.
                 tray_watch::hide_to_tray(&handle)?;
             } else if !no_overlay {
                 if let Err(err) = build_overlay(&handle) {
@@ -1384,6 +1431,10 @@ fn main() {
             handle.listen("tray-show", move |_| {
                 reveal_overlay(&show_handle, false);
             });
+            if start_hidden {
+                // After the tray-show listener, so an early failure is not missed.
+                reveal_on_capture_failure(handle.clone(), state.clone());
+            }
             if let Err(err) = build_cube_window(&handle) {
                 tracing::warn!("cube alert window is unavailable: {err}");
             }

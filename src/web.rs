@@ -181,6 +181,7 @@ struct SettingsBody {
     toasts_only_when_aion2: Option<bool>,
     auto_save_after_boss: Option<bool>,
     minimize_to_tray: Option<bool>,
+    start_in_tray: Option<bool>,
     overlay_click_through: Option<bool>,
     hidden_cube_alerts: Option<bool>,
     pet_toasts: Option<bool>,
@@ -235,6 +236,9 @@ async fn settings(
     }
     if let Some(on) = body.minimize_to_tray {
         state.set_minimize_to_tray(on);
+    }
+    if let Some(on) = body.start_in_tray {
+        state.set_start_in_tray(on);
     }
     if let Some(on) = body.overlay_click_through {
         state.set_overlay_click_through(on);

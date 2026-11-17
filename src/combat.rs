@@ -424,6 +424,9 @@ pub struct SettingsView {
     /// Desktop shell: closing the overlay hides to the tray (off: quit).
     /// Combat ignores this; AppState fills it for the live view.
     pub minimize_to_tray: bool,
+    /// Desktop shell: start hidden in the tray instead of opening the overlay.
+    /// Combat ignores this; AppState fills it for the live view.
+    pub start_in_tray: bool,
     pub start_with_windows: bool,
     pub pop_up_on_boss: bool,
     /// Desktop shell: overlay body click-through (top bar stays interactive).
@@ -642,6 +645,7 @@ impl Combat {
             boss_engage_lock: self.engage_lock,
             open_when_aion2: false,
             minimize_to_tray: true,
+            start_in_tray: true,
             start_with_windows: false,
             pop_up_on_boss: true,
             overlay_click_through: true,
