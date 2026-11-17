@@ -524,27 +524,51 @@ pub fn default_alerts_for(region: Option<Region>) -> Vec<Alert> {
     ]
 }
 
-/// Official message texts a built-in has used. If `Some`, a saved message is
-/// only replaced when it is still one of these (a custom message is kept).
-/// `None` keeps the older behaviour of always writing the current default.
-fn official_messages(default_id: &str) -> Option<&'static [&'static str]> {
+/// Names and messages built-ins shipped with in older versions, which are
+/// no longer produced by `default_alerts_for`. A saved name or message equal
+/// to one of these is still ours to update.
+fn legacy_texts(default_id: &str) -> (&'static [&'static str], &'static [&'static str]) {
     match default_id {
-        "spacetime-rift" => Some(&["Open for 10 min", "Open for 3 min"]),
-        _ => None,
+        "dimensional-invasion" => (&["Beritra Air Raid"], &["Lasts 10 min"]),
+        "spacetime-rift" => (&[], &["Open for 10 min"]),
+        "arena-of-tactics-day" => (&[], &["Open 11:00 to 14:00 server time"]),
+        "arena-of-tactics-night" => (&[], &["Open 19:00 to 21:00 server time"]),
+        _ => (&[], &[]),
     }
 }
 
-fn should_sync_message(existing: &str, default_id: Option<&str>, current: &str) -> bool {
-    match default_id.and_then(official_messages) {
-        Some(known) => known.contains(&existing) || existing == current,
-        None => true,
+/// Every name and message a built-in has had, in any region and any version.
+/// Anything else in a saved built-in is the user's own text.
+fn official_texts(default_id: &str) -> (Vec<String>, Vec<String>) {
+    let (mut names, mut messages) = (Vec::new(), Vec::new());
+    let regions = [None, Some(Region::NaWest), Some(Region::NaEast), Some(Region::Europe), Some(Region::Custom)];
+    for region in regions {
+        if let Some(builtin) = default_alerts_for(region)
+            .into_iter()
+            .find(|b| b.default_id.as_deref() == Some(default_id))
+        {
+            names.push(builtin.name);
+            messages.push(builtin.message);
+        }
     }
+    let (old_names, old_messages) = legacy_texts(default_id);
+    names.extend(old_names.iter().map(|s| s.to_string()));
+    messages.extend(old_messages.iter().map(|s| s.to_string()));
+    (names, messages)
+}
+
+/// True when `existing` is still an official text (or a blank name), so the
+/// current default may replace it; a text the user typed is kept.
+fn is_official(existing: &str, known: &[String]) -> bool {
+    let existing = existing.trim();
+    known.iter().any(|k| k == existing)
 }
 
 /// Update existing built-in timers to the current schedule for `alerts.region`,
 /// keeping each one's enabled flag, lead times, duration and id. Custom events
-/// are left alone. Official built-in messages are updated to the current text
-/// unless the user has changed them. Does not add missing built-ins;
+/// are left alone. A built-in's name and message are updated to the current
+/// text only while they are still an official text (from any region or older
+/// version); a name or message the user changed is kept. Does not add missing built-ins;
 /// `restore_defaults` does that. Ids should already be canonical; this also
 /// remaps aliases to be safe.
 pub fn sync_builtin_schedule(alerts: &mut Alerts) {
@@ -557,8 +581,13 @@ pub fn sync_builtin_schedule(alerts: &mut Alerts) {
         else {
             continue;
         };
-        existing.name = builtin.name;
-        if should_sync_message(&existing.message, builtin.default_id.as_deref(), &builtin.message) {
+        let (names, messages) = official_texts(builtin.default_id.as_deref().unwrap_or(""));
+        if existing.name.trim().is_empty() || is_official(&existing.name, &names) {
+            existing.name = builtin.name;
+        } else if existing.name != builtin.name {
+            tracing::info!(target: "alerts", default_id = builtin.default_id.as_deref().unwrap_or(""), "kept a customized built-in name");
+        }
+        if is_official(&existing.message, &messages) {
             existing.message = builtin.message;
         }
         existing.time = builtin.time;
@@ -1061,6 +1090,33 @@ mod tests {
         let shugo = a.alerts.iter().find(|x| x.default_id.as_deref() == Some("shugo-festival")).unwrap();
         assert!(!shugo.enabled);
         assert_eq!(shugo.lead_mins.as_deref(), Some(&[1][..]));
+    }
+
+    #[test]
+    fn region_change_and_migration_keep_custom_builtin_texts() {
+        let mut a = Alerts::default();
+        restore_defaults(&mut a);
+        let find = |a: &Alerts, id: &str| a.alerts.iter().find(|x| x.default_id.as_deref() == Some(id)).unwrap().clone();
+        for x in a.alerts.iter_mut() {
+            match x.default_id.as_deref() {
+                Some("guardian-lord-nahma") => x.name = "Nahma (mine)".into(),
+                Some("watcher-kaira") => x.message = "bring pots".into(),
+                _ => {}
+            }
+        }
+        a.region = Some(Region::NaEast);
+        sync_builtin_schedule(&mut a);
+        assert_eq!(find(&a, "guardian-lord-nahma").name, "Nahma (mine)");
+        assert_eq!(find(&a, "watcher-kaira").message, "bring pots");
+        // Untouched region-dependent text still follows the region.
+        assert_eq!(find(&a, "arena-of-tactics-day").message, "Open 10:00 to 13:00 server time");
+        // Old official texts are still replaced on migrate.
+        let mut old = Alerts::default();
+        let mut raid = builtin("beritra-air-raid", "Beritra Air Raid", "Lasts 10 min", "00:30", Repeat::Hours { every: 1 }, Clock::Server, true);
+        raid.id = "d-beritra-air-raid".into();
+        old.alerts.push(raid);
+        sync_builtin_schedule(&mut old);
+        assert_eq!(old.alerts[0].name, "Dimensional Invasion");
     }
 
     #[test]
