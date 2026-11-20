@@ -30,11 +30,19 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
+/// Browser and User-Agent links stay on this name until the repo is renamed:
+/// GitHub will redirect it afterwards, and the new name 404s until then.
 const REPO: &str = "CharmingDays/aion-tallymark";
-const LATEST: &str = "https://api.github.com/repos/CharmingDays/aion-tallymark/releases/latest";
+/// Try the upcoming name first, then the current one if GitHub answers 404.
+/// After the rename, the old API URL is redirected (curl already follows with -L).
+const LATEST_URLS: [&str; 2] = [
+    "https://api.github.com/repos/CharmingDays/AION2-DPS/releases/latest",
+    "https://api.github.com/repos/CharmingDays/aion-tallymark/releases/latest",
+];
 const SUMS: &str = "SHA256SUMS.txt";
-/// Every release file (installer, SHA256SUMS.txt) must start with this.
-const DOWNLOAD_PREFIX: &str = "https://github.com/CharmingDays/aion-tallymark/releases/download/";
+const OWNER: &str = "CharmingDays";
+/// Current and upcoming repository names; matched case-insensitively.
+const REPOS: [&str; 2] = ["AION2-DPS", "aion-tallymark"];
 /// Hosts a release download may end up on after GitHub's redirects.
 const DOWNLOAD_HOSTS: [&str; 3] = [
     "github.com",
@@ -180,11 +188,31 @@ fn https_host(url: &str) -> Option<String> {
 }
 
 /// A release file of this repository on github.com, over https.
+/// Accepts both the current name (aion-tallymark) and the upcoming name
+/// (AION2-DPS). Owner and repo are matched case-insensitively (GitHub treats
+/// them that way); the host and the `/releases/download/` path shape stay exact.
 fn is_release_download(url: &str) -> bool {
-    url.starts_with(DOWNLOAD_PREFIX)
-        && url.len() > DOWNLOAD_PREFIX.len()
-        && !url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '\\')
-        && https_host(url).as_deref() == Some("github.com")
+    if url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '\\') {
+        return false;
+    }
+    if https_host(url).as_deref() != Some("github.com") {
+        return false;
+    }
+    let Some(rest) = url.strip_prefix("https://github.com/") else {
+        return false;
+    };
+    let mut parts = rest.splitn(3, '/');
+    let owner = parts.next().unwrap_or("");
+    let repo = parts.next().unwrap_or("");
+    let tail = parts.next().unwrap_or("");
+    if !owner.eq_ignore_ascii_case(OWNER) {
+        return false;
+    }
+    if !REPOS.iter().any(|name| repo.eq_ignore_ascii_case(name)) {
+        return false;
+    }
+    tail.strip_prefix("releases/download/")
+        .is_some_and(|file| !file.is_empty())
 }
 
 /// Where a release download may land after redirects: GitHub's own hosts.
@@ -192,9 +220,24 @@ fn is_allowed_download_host(url: &str) -> bool {
     https_host(url).is_some_and(|host| DOWNLOAD_HOSTS.contains(&host.as_str()))
 }
 
+fn latest_release(current: &str) -> Result<(Vec<u8>, u32), String> {
+    for (i, url) in LATEST_URLS.iter().enumerate() {
+        tracing::info!(target: "update", "checking {url} (current {current})");
+        let (body, status, _) = fetch(url, current, 2 * 1024 * 1024)?;
+        if status == 404 && i + 1 < LATEST_URLS.len() {
+            tracing::info!(
+                target: "update",
+                "{url} was not found; trying the other repository name"
+            );
+            continue;
+        }
+        return Ok((body, status));
+    }
+    unreachable!("LATEST_URLS is not empty")
+}
+
 fn ask_github(current: &str) -> Result<Release, String> {
-    tracing::info!(target: "update", "checking {LATEST} (current {current})");
-    let (body, status, _) = fetch(LATEST, current, 2 * 1024 * 1024)?;
+    let (body, status) = latest_release(current)?;
     match status {
         200 => {}
         403 | 429 => {
@@ -415,7 +458,9 @@ pub fn installed() -> bool {
         .unwrap_or(false)
 }
 
-/// The fixed release page, for the dialog's link.
+/// The fixed release page, for the dialog's link. Kept on the current
+/// repository name so the link works both before and after the rename
+/// (GitHub redirects the old URL).
 pub const RELEASES: &str = "https://github.com/CharmingDays/aion-tallymark/releases/latest";
 
 fn update_dir(version: &str) -> PathBuf {
@@ -557,15 +602,28 @@ mod tests {
 
     #[test]
     fn only_github_release_downloads_are_accepted() {
-        let ok = "https://github.com/CharmingDays/aion-tallymark/releases/download/v0.3.12/SHA256SUMS.txt";
-        assert!(is_release_download(ok));
+        for ok in [
+            "https://github.com/CharmingDays/aion-tallymark/releases/download/v0.3.12/SHA256SUMS.txt",
+            "https://github.com/CharmingDays/AION2-DPS/releases/download/v0.3.14/SHA256SUMS.txt",
+            "https://github.com/charmingdays/aion-tallymark/releases/download/v0.3.12/SHA256SUMS.txt",
+            "https://github.com/CHARMINGDAYS/aion2-dps/releases/download/v0.3.14/x",
+            "https://github.com/CharmingDays/Aion-Tallymark/releases/download/v1/x",
+        ] {
+            assert!(is_release_download(ok), "{ok}");
+        }
         for bad in [
             "http://github.com/CharmingDays/aion-tallymark/releases/download/v0.3.12/SHA256SUMS.txt",
             "https://github.com.evil.example/CharmingDays/aion-tallymark/releases/download/x",
             "https://evil.example/CharmingDays/aion-tallymark/releases/download/x",
             "https://github.com/someone/else/releases/download/v1/SHA256SUMS.txt",
             "https://github.com/CharmingDays/aion-tallymark/releases/download/",
+            "https://github.com/CharmingDays/AION2-DPS/releases/download/",
             "https://github.com/CharmingDays/aion-tallymark/releases/download/v1/a b",
+            "https://github.com/CharmingDays/aion-tallymark-extra/releases/download/v1/x",
+            "https://github.com/CharmingDays/not-this-repo/releases/download/v1/x",
+            "https://github.com/CharmingDays/aion-tallymark/releases/downloads/v1/x",
+            "https://github.com/CharmingDays/AION2-DPS/archive/refs/tags/v0.3.14.zip",
+            "https://GitHub.com/CharmingDays/aion-tallymark/releases/download/v1/x",
             "",
         ] {
             assert!(!is_release_download(bad), "{bad}");

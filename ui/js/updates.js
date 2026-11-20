@@ -1,6 +1,7 @@
 // "Check for updates" (the version pill in the detailed meter) and the
 // automatic background check (Config > General, on by default).
-// The app asks GitHub for the latest release of aion-tallymark; on "Update now"
+// The app asks GitHub for the latest release of aion-tallymark (or AION2-DPS
+// after that repo is renamed); on "Update now"
 // it downloads the installer, checks its SHA-256 against the release's
 // SHA256SUMS.txt, starts it and closes so the files can be replaced. Nothing is
 // downloaded or installed unless the user clicks "Update now". App only.
