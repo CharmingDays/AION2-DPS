@@ -70,6 +70,10 @@ pub struct Live {
     pub pets_version: u64,
     /// Config > Toasts & pop-ups: the look and place of each kind of pop-up.
     pub toast_styles: crate::toast_style::ToastStyles,
+    /// The buff bar: effects on you and your debuffs on the target, filtered.
+    pub buffs: crate::effects::EffectsView,
+    /// Config > Buffs & debuffs.
+    pub buff_settings: crate::effects::BuffSettings,
     /// Newer GitHub release version, if one is known and not skipped.
     /// The detailed meter uses this; nothing is installed until the user asks.
     pub update_available: Option<String>,
@@ -113,6 +117,9 @@ pub struct AppState {
     debug_cubes: AtomicBool,
     debug_env: DebugLogs,
     toast_styles: Mutex<crate::toast_style::ToastStyles>,
+    /// Buffs and debuffs from the effect packets; cleared with the fight.
+    effects: Mutex<crate::effects::Effects>,
+    buff_settings: Mutex<crate::effects::BuffSettings>,
     capture: Mutex<CaptureInfo>,
     /// When on, the overlay reopens when the AION 2 client starts if the app
     /// is in the tray. Desktop shell only; combat ignores it.
@@ -226,6 +233,8 @@ impl AppState {
             debug_cubes: AtomicBool::new(stored.debug_cubes),
             debug_env: DebugLogs::from_env(),
             toast_styles: Mutex::new(crate::toast_style::load(&stored.toast_styles)),
+            effects: Mutex::new(crate::effects::Effects::default()),
+            buff_settings: Mutex::new(crate::effects::BuffSettings::load(&stored.buffs)),
             capture: Mutex::new(CaptureInfo::default()),
             open_when_aion2: AtomicBool::new(stored.open_when_aion2),
             minimize_to_tray: AtomicBool::new(stored.minimize_to_tray),
@@ -427,7 +436,10 @@ impl AppState {
         settings.check_updates_automatically = self.check_updates_automatically();
         settings.toasts_only_when_aion2 = self.toasts_only_when_aion2();
         settings.auto_save_after_boss = self.auto_save_after_boss();
+        let buffs = self.buff_view(now, meter.target_id);
         Live {
+            buffs,
+            buff_settings: self.buff_settings(),
             cube_alerts: self.with_cubes(|cubes| {
                 if self.hidden_cube_alerts() {
                     let mut list = cubes.alerts(now);
@@ -473,6 +485,52 @@ impl AppState {
 
     pub fn reset(&self, now: i64) {
         self.with_combat(|combat| combat.reset(now));
+        self.clear_effects();
+    }
+
+    /// Track the buffs and debuffs in one packet's events.
+    pub fn apply_effects(&self, events: &[crate::decode::Event], now: i64) {
+        self.effects.lock().unwrap_or_else(|e| e.into_inner()).apply(events, now);
+    }
+
+    /// A new server connection or zone: no effect from before still applies.
+    pub fn clear_effects(&self) {
+        self.effects.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    pub fn buff_settings(&self) -> crate::effects::BuffSettings {
+        self.buff_settings.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Change any of enabled, layout, show_all, skills. Saved at once.
+    pub fn set_buff_settings(&self, patch: &serde_json::Value) -> Result<crate::effects::BuffSettings, String> {
+        let next = {
+            let mut settings = self.buff_settings.lock().unwrap_or_else(|e| e.into_inner());
+            *settings = settings.merged(patch)?;
+            settings.clone()
+        };
+        self.store_settings();
+        Ok(next)
+    }
+
+    /// Config's skill picker.
+    pub fn buff_skill_options(&self) -> Vec<crate::effects::SkillOption> {
+        crate::effects::skill_options(&self.buff_settings())
+    }
+
+    /// The bar's rows for `target`; remembers newly shown skills.
+    fn buff_view(&self, now: i64, target: Option<i32>) -> crate::effects::EffectsView {
+        let (view, seen_changed) = {
+            let combat = self.combat.lock().unwrap_or_else(|e| e.into_inner());
+            let mut effects = self.effects.lock().unwrap_or_else(|e| e.into_inner());
+            let mut settings = self.buff_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let filter = settings.clone();
+            effects.view(now, combat.you(), target, |id| combat.owner(id), &filter, &mut settings.seen)
+        };
+        if seen_changed {
+            self.store_settings();
+        }
+        view
     }
 
     pub fn set_reset_after_secs(&self, secs: u64) -> bool {
@@ -796,6 +854,7 @@ impl AppState {
             debug_position: self.debug_position.load(Ordering::Relaxed),
             debug_cubes: self.debug_cubes.load(Ordering::Relaxed),
             toast_styles: serde_json::to_value(self.toast_styles()).unwrap_or_default(),
+            buffs: serde_json::to_value(self.buff_settings()).unwrap_or_default(),
         });
     }
 
@@ -851,6 +910,8 @@ struct StoredSettings {
     debug_cubes: bool,
     /// Per kind, any subset of a toast style; see `toast_style::load`.
     toast_styles: serde_json::Value,
+    /// The buff bar's settings; see `effects::BuffSettings::load`.
+    buffs: serde_json::Value,
 }
 
 fn clamp_toast_secs(secs: u64) -> u64 {
@@ -883,6 +944,7 @@ impl Default for StoredSettings {
             debug_position: false,
             debug_cubes: false,
             toast_styles: serde_json::Value::Null,
+            buffs: serde_json::Value::Null,
         }
     }
 }
@@ -913,6 +975,7 @@ impl From<SettingsView> for StoredSettings {
             debug_position: view.debug_position,
             debug_cubes: view.debug_cubes,
             toast_styles: serde_json::Value::Null,
+            buffs: serde_json::Value::Null,
         }
     }
 }

@@ -1079,6 +1079,16 @@ impl Combat {
         }
     }
 
+    /// The local player's entity, once `4A 36` named it.
+    pub fn you(&self) -> Option<i32> {
+        self.self_id
+    }
+
+    /// Who an entity acts for: a summon's or spell object's owner, or itself.
+    pub fn owner(&self, id: i32) -> i32 {
+        self.owner_of(id)
+    }
+
     /// Follows summon to owner, so a summon's summon lands on the player.
     fn owner_of(&self, id: i32) -> i32 {
         let mut current = id;
@@ -1190,6 +1200,8 @@ impl Combat {
                 frozen,
             } => self.apply_stagger(id, max, remaining, frozen, now),
             Event::StaggerBreak { id } => self.apply_stagger_break(id, now),
+            // Buffs and debuffs are tracked by `effects::Effects`.
+            Event::EffectOn { .. } | Event::EffectOff { .. } => {}
             Event::SummonSpawn {
                 summon,
                 owner,
@@ -1713,7 +1725,12 @@ impl Combat {
             | Event::Spawn { id, .. }
             | Event::Despawn { id }
             | Event::Stagger { id, .. }
-            | Event::StaggerBreak { id } => mark(*id),
+            | Event::StaggerBreak { id }
+            | Event::EffectOff { target: id, .. } => mark(*id),
+            Event::EffectOn { target, caster, .. } => {
+                mark(*target);
+                mark(*caster);
+            }
             Event::SummonSpawn {
                 summon,
                 owner,

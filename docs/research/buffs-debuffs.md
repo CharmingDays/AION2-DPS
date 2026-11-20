@@ -48,3 +48,10 @@ apply/remove packet to be identified first. Next step: add an opt-in
 "unknown opcodes" capture to the debug logs and collect a few labelled
 sessions in game; only then decide whether to light up the greyed-out Buffs,
 Debuffs and Shields filters in Ability share.
+
+## Decoded (2026-11-20 capture)
+`decode::parse_effects` reads `2A 38` / `2B 38` / `2C 38` and `effects::Effects` tracks them for the
+buff bar. Field check against the capture: after the duration comes a **4-byte** field (0 in every
+skill effect; -1 on kind 0x11), then the server expiry u64, so the caster starts 20 bytes after the
+effect id. Kind 0x11 (flight, rest, hidden states) is skipped. Expiry is local receive time plus the
+duration; `2C 38`, a despawn, a new server connection or a fight reset clear effects.

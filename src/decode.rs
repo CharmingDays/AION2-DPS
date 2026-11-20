@@ -144,6 +144,29 @@ pub enum Event {
         /// A spirit's buff-block caster, or a ground spell's caster.
         cast_owner: Option<i32>,
     },
+    /// `2A 38` (applied) or `2B 38` (refreshed): a buff or debuff on
+    /// `target`. `seq` names this instance on that target until a
+    /// [`Event::EffectOff`] for it. See [`parse_effects`] for the layout.
+    EffectOn {
+        target: i32,
+        seq: u32,
+        /// 9 digits for a skill effect: the effect's own skill id times 10
+        /// plus one digit (`157100071` is Fire Mark, `15710007`).
+        effect: u32,
+        /// Milliseconds; -1 is until removed.
+        duration_ms: i32,
+        caster: i32,
+        /// The skill that applied it (may differ from `effect / 10`).
+        skill: u32,
+        refresh: bool,
+    },
+    /// `2C 38`: the instance `seq` on `target` ended. Reason 1 is expired,
+    /// 7 removed early, 0x13 cleared together with others.
+    EffectOff {
+        target: i32,
+        seq: u32,
+        reason: u8,
+    },
 }
 
 /// Everything this packet contributes. Top-level bundles are already opened.
@@ -172,7 +195,102 @@ pub fn parse_packet(packet: &[u8]) -> Vec<Event> {
     if let Some(stagger) = parse_stagger(packet) {
         events.push(stagger);
     }
+    events.extend(parse_effects(packet));
     events
+}
+
+/// Effect kind byte of a skill buff or debuff. `0x11` is a system effect
+/// (flight, rest, hidden states) with a different tail; it is skipped.
+const EFFECT_SKILL: u8 = 0x13;
+/// Longest believable effect: a day.
+const EFFECT_MAX_MS: i32 = 86_400_000;
+
+/// Buffs and debuffs, read from captured bytes only:
+///
+/// ```text
+/// 2A 38 <target> 01 <kind 13> <seq> <effect u32> <duration ms i32> <u32, 0 so far>
+///       <server expiry u64 ms> <caster> <1 byte> <skill u32> ...positions
+/// 2B 38 <target>    <kind 13> <seq> ...same as 2A 38 (a refresh)
+/// 2C 38 <target> <count> { 00 <seq> <reason u8> } * count
+/// ```
+pub fn parse_effects(packet: &[u8]) -> Vec<Event> {
+    let Some(at) = opcode_at(packet) else {
+        return Vec::new();
+    };
+    match packet.get(at..at + 2) {
+        Some([0x2A, 0x38]) => parse_effect_on(packet, at + 2, false).into_iter().collect(),
+        Some([0x2B, 0x38]) => parse_effect_on(packet, at + 2, true).into_iter().collect(),
+        Some([0x2C, 0x38]) => parse_effect_off(packet, at + 2),
+        _ => Vec::new(),
+    }
+}
+
+fn entity_at(packet: &[u8], at: &mut usize) -> Option<i32> {
+    let id = read_varint(packet, *at);
+    if id.length <= 0 || !(100..=9_999_999).contains(&id.value) {
+        return None;
+    }
+    *at += id.length as usize;
+    Some(id.value)
+}
+
+fn seq_at(packet: &[u8], at: &mut usize) -> Option<u32> {
+    let seq = read_varint(packet, *at);
+    if seq.length <= 0 || seq.value < 0 {
+        return None;
+    }
+    *at += seq.length as usize;
+    Some(seq.value as u32)
+}
+
+fn parse_effect_on(packet: &[u8], mut at: usize, refresh: bool) -> Option<Event> {
+    let target = entity_at(packet, &mut at)?;
+    if !refresh {
+        at += 1;
+    }
+    if *packet.get(at)? != EFFECT_SKILL {
+        return None;
+    }
+    at += 1;
+    let seq = seq_at(packet, &mut at)?;
+    let u32_at = |i: usize| -> Option<u32> { Some(u32::from_le_bytes(packet.get(i..i + 4)?.try_into().ok()?)) };
+    let effect = u32_at(at)?;
+    let duration_ms = u32_at(at + 4)? as i32;
+    let expiry = u64::from_le_bytes(packet.get(at + 12..at + 20)?.try_into().ok()?);
+    at += 20;
+    let caster = entity_at(packet, &mut at)?;
+    let skill = u32_at(at + 1)?;
+    let sane = effect > 0
+        && (duration_ms == -1 || (0..=EFFECT_MAX_MS).contains(&duration_ms))
+        && (1_500_000_000_000..4_000_000_000_000).contains(&expiry)
+        && (1_000..=99_999_999).contains(&skill);
+    sane.then_some(Event::EffectOn { target, seq, effect, duration_ms, caster, skill, refresh })
+}
+
+fn parse_effect_off(packet: &[u8], mut at: usize) -> Vec<Event> {
+    let mut out = Vec::new();
+    let Some(target) = entity_at(packet, &mut at) else {
+        return out;
+    };
+    let Some(&count) = packet.get(at) else {
+        return out;
+    };
+    at += 1;
+    for _ in 0..count {
+        if packet.get(at) != Some(&0x00) {
+            break;
+        }
+        at += 1;
+        let Some(seq) = seq_at(packet, &mut at) else {
+            break;
+        };
+        let Some(&reason) = packet.get(at) else {
+            break;
+        };
+        at += 1;
+        out.push(Event::EffectOff { target, seq, reason });
+    }
+    out
 }
 
 /// `<len> 05 E0 <id varint>` then either the gauge
@@ -1865,5 +1983,68 @@ mod tests {
         assert!(staggers_of("05e092a2020301b0040000a604000004").is_empty());
         assert!(staggers_of("05e092a2020301b0040000a60400000200").is_empty());
         assert!(staggers_of("05e092a20200030200").is_empty());
+    }
+
+    /// Real rows from the 2026-11-20 Sorcerer capture (`opcode_hex`, so
+    /// without the length varint).
+    fn effects_of(hex: &str) -> Vec<Event> {
+        let body: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+        parse_packet(&crate::framing::encode_frame(&body))
+            .into_iter()
+            .filter(|e| matches!(e, Event::EffectOn { .. } | Event::EffectOff { .. }))
+            .collect()
+    }
+
+    #[test]
+    fn effect_apply_on_self() {
+        // Pyroclasm's 10 s fire damage buff on the player (1966).
+        assert_eq!(
+            effects_of("2a38ae0f01139c01f7f8160910270000000000003830b3faa1010000ae0f017fb2e80000e4c1c4443a4a3743a5e89442"),
+            vec![Event::EffectOn { target: 1966, seq: 156, effect: 152_500_471, duration_ms: 10_000, caster: 1966, skill: 15_250_047, refresh: false }]
+        );
+        // Dodge: a short id, the skill comes from the source field.
+        assert_eq!(
+            effects_of("2a38ae0f01139f01c70b0000b80b0000000000008d2ab3faa1010000ae0f0124e2e400002b0fb944bd10adc400009042"),
+            vec![Event::EffectOn { target: 1966, seq: 159, effect: 3015, duration_ms: 3000, caster: 1966, skill: 15_000_100, refresh: false }]
+        );
+    }
+
+    #[test]
+    fn effect_debuff_and_refresh() {
+        // Fire Mark on the dummy (41546), then its refresh (no flag byte).
+        let on = Event::EffectOn { target: 41546, seq: 6, effect: 157_100_071, duration_ms: 5000, caster: 1966, skill: 15_710_007, refresh: false };
+        assert_eq!(effects_of("2a38cac40201130627285d098813000000000000fef6b2faa1010000ae0f0137b7ef000068f8b8431a42bb4400009042"), vec![on]);
+        assert_eq!(
+            effects_of("2b38cac402130627285d098813000000000000a1fdb2faa1010000ae0f0137b7ef000287a212443adaaf4400009042"),
+            vec![Event::EffectOn { target: 41546, seq: 6, effect: 157_100_071, duration_ms: 5000, caster: 1966, skill: 15_710_007, refresh: true }]
+        );
+        // Cold Storm's slow, cast by the storm object (40596).
+        assert_eq!(
+            effects_of("2a38cac40201130f79560f0910270000000000002722b3faa101000094bd02050cefe70000000040c00000c04000009042"),
+            vec![Event::EffectOn { target: 41546, seq: 15, effect: 152_000_121, duration_ms: 10_000, caster: 40596, skill: 15_200_012, refresh: false }]
+        );
+    }
+
+    #[test]
+    fn effect_removals() {
+        assert_eq!(effects_of("2c38cac40201000701"), vec![Event::EffectOff { target: 41546, seq: 7, reason: 1 }]);
+        assert_eq!(effects_of("2c38ae0f0100960107"), vec![Event::EffectOff { target: 1966, seq: 150, reason: 7 }]);
+        assert_eq!(
+            effects_of("2c38cac40204000613006613006213000313"),
+            vec![
+                Event::EffectOff { target: 41546, seq: 6, reason: 0x13 },
+                Event::EffectOff { target: 41546, seq: 102, reason: 0x13 },
+                Event::EffectOff { target: 41546, seq: 98, reason: 0x13 },
+                Event::EffectOff { target: 41546, seq: 3, reason: 0x13 },
+            ]
+        );
+    }
+
+    #[test]
+    fn system_effects_and_short_rows_are_skipped() {
+        // Kind 0x11 (a hidden state with no duration) has another tail.
+        assert!(effects_of("2a38ae0f0111960191e2f505ffffffffffffffff8075d52abb030000ae0f010087a212443adaaf4400009042").is_empty());
+        assert!(effects_of("2a38cac40201130627285d0988130000").is_empty());
+        assert!(effects_of("2c38cac402").is_empty());
     }
 }

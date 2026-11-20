@@ -19,6 +19,7 @@
     { id: 'meter', label: 'Meter', blurb: 'When a fight resets, how bosses hold the view, and session auto-save.' },
     { id: 'alerts', label: 'Alerts & Notifications', blurb: 'Event alert toasts, sound and position, plus the pet progress toast.' },
     { id: 'toasts', label: 'Toasts & pop-ups', blurb: 'How each pop-up looks and where it shows. Pick a type, then change its size, place, text and colours.' },
+    { id: 'buffs', label: 'Buffs & debuffs', blurb: 'A bar of icons with countdowns: buffs on you, and the debuffs you put on your target. Read from packets the game already sends; nothing is sent to it.' },
     { id: 'exploration', label: 'Exploration', blurb: 'Passive alerts for things found while exploring.' },
     { id: 'pets', label: 'Pets', blurb: 'Pet soul progress. These settings are also listed under Alerts & Notifications.' },
     { id: 'achievements', label: 'Achievements', blurb: 'Nothing to set yet.', soon: true },
@@ -128,6 +129,23 @@
       label: 'Hidden cube alerts', desc: 'Only confirmed cube types alert. Unknown distance is hidden.',
       keywords: ['cube', 'treasure', 'explore', 'hidden'] },
 
+    { id: 'buff_enabled', section: 'buffs', card: 'Buff bar', type: 'toggle', default: true, store: 'buffs', key: 'enabled', appOnly: true,
+      alsoIn: ['toasts'], toastOnly: ['buffs'],
+      label: 'Show the buff bar', desc: 'Buffs on you, then your debuffs on the target. It shows only while there is something on it and never takes clicks from the game.',
+      keywords: ['buff', 'debuff', 'effect', 'icon', 'bar', 'timer', 'countdown'] },
+    { id: 'buff_layout', section: 'buffs', card: 'Buff bar', type: 'segmented', default: 'horizontal', store: 'buffs', key: 'layout', appOnly: true,
+      alsoIn: ['toasts'], toastOnly: ['buffs'], dependsOn: 'buff_enabled',
+      options: [['horizontal', 'Horizontal'], ['vertical', 'Vertical']],
+      label: 'Layout', desc: 'One line of icons, side by side or stacked.', keywords: ['buff', 'horizontal', 'vertical', 'row', 'column', 'line', 'orientation'] },
+    { id: 'buff_place', section: 'buffs', card: 'Buff bar', type: 'action', action: 'buff-place', button: 'Size & place', appOnly: true,
+      label: 'Where it shows', desc: 'Size, screen location, monitor and colours are under Toasts & pop-ups \u203a Buff bar, like the other pop-ups (Place on screen to drag it).',
+      keywords: ['buff', 'position', 'place', 'move', 'location', 'size', 'drag'] },
+    { id: 'buff_show_all', section: 'buffs', card: 'Skills', type: 'toggle', default: true, store: 'buffs', key: 'show_all', appOnly: true, dependsOn: 'buff_enabled',
+      label: 'Show all', desc: 'Every buff and debuff. Turn it off to show only the skills picked below.', keywords: ['buff', 'all', 'filter', 'skills'] },
+    { id: 'buff_skills', section: 'buffs', card: 'Skills', type: 'skills', default: [], store: 'buffs', key: 'skills', appOnly: true, dependsOn: 'buff_enabled',
+      label: 'Skills to show', desc: 'Used when Show all is off. Skills seen on the bar come first, then every class skill. Search by name or class.',
+      keywords: ['buff', 'debuff', 'skill', 'filter', 'pick', 'select', 'search'] },
+
     debugLog('debug_pets', 'pets', 'Pets', 'pet-debug.jsonl'),
     debugLog('debug_position', 'position', 'Position', 'position-debug.jsonl'),
     debugLog('debug_cubes', 'cubes', 'Cubes', 'cube-discovery.jsonl'),
@@ -138,8 +156,9 @@
   function toastRows(k) {
     const L = styles.LIMITS;
     const def = styles.defaults(k.id);
-    const on = k.event ? `toast.${k.id}.enabled` : k.id === 'pet' ? 'pet_toasts' : 'hidden_cube_alerts';
-    const places = styles.POSITIONS.map(([v, label]) => [v, v === 'auto' ? (k.id === 'cube' ? 'Top center (default)' : label) : label]);
+    const on = k.event ? `toast.${k.id}.enabled` : k.id === 'pet' ? 'pet_toasts' : k.id === 'buffs' ? 'buff_enabled' : 'hidden_cube_alerts';
+    const own = k.id === 'cube' || k.id === 'buffs';
+    const places = styles.POSITIONS.map(([v, label]) => [v, v === 'auto' ? (own ? 'Top center (default)' : label) : label]);
     const fields = k.fields.map((f) => `{${f}}`).join(' ');
     const rows = [];
     if (k.event) {
@@ -156,7 +175,7 @@
       { key: 'scale', card: 'Size & place', type: 'slider', min: L.scale[0], max: L.scale[1], step: 10, unit: '%',
         label: 'Size', desc: 'Scale the whole pop-up (70–150%).', keywords: ['scale', 'zoom', 'big', 'small'] },
       { key: 'position', card: 'Size & place', type: 'select', options: places, appOnly: true,
-        label: 'Screen location', desc: k.id === 'cube' ? 'Where on the monitor it shows. Custom (under Advanced) is anywhere.' : 'Where on the monitor it shows. Auto follows Event alerts › Position; Custom (under Advanced) is anywhere.',
+        label: 'Screen location', desc: own ? 'Where on the monitor it shows. Custom (under Advanced) is anywhere.' : 'Where on the monitor it shows. Auto follows Event alerts › Position; Custom (under Advanced) is anywhere.',
         keywords: ['position', 'place', 'corner', 'top', 'bottom', 'left', 'right', 'center'] },
       { key: 'monitor', card: 'Size & place', type: 'select', appOnly: true,
         options: [[0, 'Primary'], ...Array.from({ length: L.monitor }, (_, i) => [i + 1, `Monitor ${i + 1}`])],
@@ -177,10 +196,10 @@
       { key: 'message', card: 'Text', type: 'text', max: L.message, placeholder: k.message,
         label: 'Message', desc: `Blank keeps the built-in text. Placeholders: ${fields}.`, keywords: ['template', 'wording', 'line', 'body'] },
       { key: 'font_px', card: 'Text', type: 'stepper', min: L.font[0], max: L.font[1], step: 1, unit: 'px',
-        label: 'Text size', desc: `Size of the main line (${def.font_px} px by default).`, keywords: ['font', 'size', 'text', 'big'] },
-      { key: 'accent', card: 'Colors', type: 'tcolor', fallback: k.id === 'live' ? '#4ade80' : k.id === 'imminent' ? '#fbbf24' : k.id === 'cube' ? '#22d3ee' : '#5b9dff',
-        label: 'Accent colour', desc: k.id === 'pet' ? 'Edge, icon and bar. Default uses the pet family colour.' : 'Edge, icon and countdown bar.', keywords: ['color', 'colour', 'tone', 'border', 'edge'] },
-      { key: 'background', card: 'Colors', type: 'tcolor', fallback: k.id === 'cube' ? '#101d25' : '#161a21', dark: true,
+        label: 'Text size', desc: k.id === 'buffs' ? `Size of the countdown on each icon (${def.font_px} px by default).` : `Size of the main line (${def.font_px} px by default).`, keywords: ['font', 'size', 'text', 'big'] },
+      { key: 'accent', card: 'Colors', type: 'tcolor', fallback: k.id === 'live' || k.id === 'buffs' ? '#4ade80' : k.id === 'imminent' ? '#fbbf24' : k.id === 'cube' ? '#22d3ee' : '#5b9dff',
+        label: 'Accent colour', desc: k.id === 'pet' ? 'Edge, icon and bar. Default uses the pet family colour.' : k.id === 'buffs' ? 'Edge of your buffs. Debuffs on the target keep a red edge.' : 'Edge, icon and countdown bar.', keywords: ['color', 'colour', 'tone', 'border', 'edge'] },
+      { key: 'background', card: 'Colors', type: 'tcolor', fallback: k.id === 'cube' ? '#101d25' : k.id === 'buffs' ? '#0f1115' : '#161a21', dark: true,
         label: 'Background colour', desc: 'The pop-up’s fill.', keywords: ['color', 'colour', 'fill', 'panel'] },
       { key: 'text', card: 'Colors', type: 'tcolor', fallback: '#e6e9ef', light: true,
         label: 'Text colour', desc: 'Main text; the second line is a little dimmer.', keywords: ['color', 'colour', 'font'] },
@@ -189,7 +208,7 @@
       { key: 'show_icon', card: 'Colors', type: 'toggle',
         label: 'Show icon', desc: k.id === 'pet' ? 'The pet portrait.' : k.id === 'cube' ? 'The cube symbol.' : 'The coloured dot.', keywords: ['icon', 'image', 'dot', 'portrait'] },
     );
-    return rows.map((r) => ({
+    return rows.filter((r) => !(k.skip || []).includes(r.key)).map((r) => ({
       ...r, id: `toast.${k.id}.${r.key}`, fullLabel: `${k.label} \u203a ${r.label}`, section: 'toasts', store: PLAIN.includes(r.type) ? undefined : 'toast', toastKind: k.id, group: `${k.id}:${r.card}`,
       default: PLAIN.includes(r.type) ? undefined : def[r.key], dependsOn: r.key === 'enabled' ? undefined : on,
       keywords: [...(r.keywords || []), 'toast', 'pop-up', 'notification', k.short.toLowerCase()],
@@ -283,6 +302,7 @@
       case 'stepper': case 'slider': return d.unit === '%' ? `${v}%` : `${v} ${d.unit || ''}`.trim();
       case 'damage': return formatDamage ? formatDamage(v) : String(v);
       case 'multi': return v.length ? `${[...v].sort((a, b) => a - b).join(', ')} min` : 'none';
+      case 'skills': return v.length ? `${v.length} skill${v.length === 1 ? '' : 's'}` : 'none picked';
       case 'text': return v ? `\u201c${v}\u201d` : 'built-in text';
       case 'tcolor': return v || 'Default';
       case 'segmented': case 'select': { const o = (d.options || []).find(([x]) => same(x, v)); return o ? o[1] : String(v); }

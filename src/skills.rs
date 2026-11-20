@@ -41,6 +41,11 @@ pub fn skill_name(id: i32) -> String {
         .unwrap_or_else(|| id.to_string())
 }
 
+/// Whether the table names this id or its family (not just the id fallback).
+pub fn has_name(id: i32) -> bool {
+    table().contains_key(&canonical_skill_id(id))
+}
+
 /// A spirit pet's own skill, such as "Earth Spirit: Tackle". Not a
 /// Spiritmaster spell such as "Summon: Wind Spirit" or "Spirit's Benediction".
 pub fn is_spirit_skill(id: i32) -> bool {

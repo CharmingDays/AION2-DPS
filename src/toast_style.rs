@@ -1,6 +1,6 @@
 //! How each kind of pop-up looks and where it shows: event alert toasts
 //! (upcoming, starting soon, live), the pet soul progress toast and the
-//! hidden cube alert. Set in Config > Toasts & pop-ups and saved in
+//! hidden cube alert, plus the buff bar's size, place and colours. Set in Config > Toasts & pop-ups and saved in
 //! settings.json. The look is applied by the pages; the desktop shell reads
 //! the place (monitor, screen position, offset) and size to move the windows.
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 /// Every kind, in Config order.
-pub const KINDS: &[&str] = &["upcoming", "imminent", "live", "pet", "cube"];
+pub const KINDS: &[&str] = &["upcoming", "imminent", "live", "pet", "cube", "buffs"];
 /// `auto` follows Event alerts > Position (top or bottom center); `custom` is
 /// anywhere, at `x_pct` / `y_pct` of the monitor.
 pub const POSITIONS: &[&str] = &[
@@ -62,7 +62,8 @@ impl ToastStyle {
             scale: 100,
             position: "auto".into(),
             offset_x: 0,
-            offset_y: 0,
+            // The buff bar sits just under the hidden cube alert by default.
+            offset_y: if kind == "buffs" { 160 } else { 0 },
             x_pct: 50,
             y_pct: 10,
             monitor: 0,
@@ -71,12 +72,13 @@ impl ToastStyle {
             font_px: match kind {
                 "pet" => 14,
                 "cube" => 23,
+                "buffs" => 11,
                 _ => 13,
             },
             accent: String::new(),
             background: String::new(),
             text: String::new(),
-            bg_opacity: 100,
+            bg_opacity: if kind == "buffs" { 70 } else { 100 },
             show_icon: true,
             sound: "default".into(),
         }

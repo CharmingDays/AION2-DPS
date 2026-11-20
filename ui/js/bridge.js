@@ -151,6 +151,16 @@
     setToastStyle: (kind, patch) => (inApp
       ? tauri.core.invoke('set_toast_style', { kind, patch })
       : post('/api/toast-style', { kind, patch })),
+    /** Config > Buffs & debuffs: some of enabled, layout, show_all, skills. Resolves with all of them. */
+    setBuffSettings: (patch) => (inApp
+      ? tauri.core.invoke('set_buff_settings', { patch })
+      : post('/api/buffs/settings', patch)),
+    /** The skills the buff picker offers: [{ skill, name, named, icon, class, seen }]. */
+    buffSkills: () => (inApp ? tauri.core.invoke('buff_skills') : get('/api/buffs/skills')),
+    /** A skill icon as a data: URL; downloaded once from aion2data.com unless `download` is false (app only). */
+    skillIcon: (icon, download = true) => (inApp && icon ? tauri.core.invoke('skill_icon', { icon, download }) : Promise.resolve(null)),
+    /** Show a sample on the buff bar for a few seconds (app only). */
+    testBuffBar: () => (inApp ? tauri.core.invoke('test_buff_bar') : Promise.resolve()),
     /** Show a sample in the hidden cube window (app only). */
     testCubeToast: () => (inApp ? tauri.core.invoke('test_cube_toast') : Promise.resolve()),
     /** "Place on screen": the custom-spot fields where the sample was dropped, or null (Esc). App only. */

@@ -1,0 +1,50 @@
+/* The buff bar (buffs.html), also drawn in the Config preview and placer. */
+.buff-wrap { display: flex; width: 100%; height: 100%; box-sizing: border-box; padding: 4px; pointer-events: none; }
+.buff-wrap[data-layout="horizontal"] { flex-direction: row; }
+.buff-wrap[data-layout="vertical"] { flex-direction: column; }
+.buff-wrap[data-main="start"] { justify-content: flex-start; }
+.buff-wrap[data-main="center"] { justify-content: center; }
+.buff-wrap[data-main="end"] { justify-content: flex-end; }
+.buff-wrap[data-cross="start"] { align-items: flex-start; }
+.buff-wrap[data-cross="center"] { align-items: center; }
+.buff-wrap[data-cross="end"] { align-items: flex-end; }
+
+.buff-bar {
+  --buff-tone: #4ade80; --buff-font: 11px;
+  display: flex; gap: 4px; padding: 5px; border-radius: 10px; box-sizing: border-box;
+  background: rgba(15, 17, 21, 0.7); color: #e6e9ef; font-family: var(--font, "Inter", system-ui, sans-serif);
+  max-width: 100%; max-height: 100%; overflow: hidden;
+}
+.buff-bar[hidden] { display: none; }
+.buff-wrap[data-layout="horizontal"] .buff-bar { flex-direction: row; }
+.buff-wrap[data-layout="vertical"] .buff-bar { flex-direction: column; }
+
+.buff {
+  position: relative; flex: 0 0 auto; width: 38px; height: 38px; box-sizing: border-box;
+  border: 1.5px solid var(--buff-tone); border-radius: 7px; overflow: hidden; background: #1e232c;
+}
+.buff.debuff { border-color: #f87171; }
+.buff-face { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.buff-face img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.buff-face.text {
+  background: hsl(var(--h, 210) 38% 26%); color: hsl(var(--h, 210) 70% 86%);
+  font-size: 13px; font-weight: 700; letter-spacing: 0.02em; align-items: flex-start; padding-top: 6px; box-sizing: border-box;
+}
+.buff-face.unknown { background: #262b35; color: #8a93a3; font-size: 10px; font-weight: 600; padding-top: 8px; }
+.buff-sweep { position: absolute; inset: 0; background: conic-gradient(rgba(0, 0, 0, 0.6) var(--done, 0%), transparent 0); }
+.buff-time {
+  position: absolute; left: 0; right: 0; bottom: 1px; text-align: center;
+  font-size: var(--buff-font); font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 2px #000, 0 0 3px #000, 0 1px 1px #000;
+}
+.buff.ending .buff-time { color: #fbbf24; }
+.buff-count {
+  position: absolute; right: 1px; top: 1px; min-width: 9px; padding: 0 2px; border-radius: 4px;
+  font-size: 9px; font-weight: 700; line-height: 11px; text-align: center; background: rgba(0, 0, 0, 0.7);
+}
+.buff-count:empty { display: none; }
+.buff.fresh { animation: buff-pulse 0.35s ease-out; }
+@keyframes buff-pulse { from { box-shadow: inset 0 0 0 2px #fff8, 0 0 6px var(--buff-tone); } to { box-shadow: none; } }
+.buff-sep { flex: 0 0 auto; align-self: stretch; background: rgba(255, 255, 255, 0.18); }
+.buff-wrap[data-layout="horizontal"] .buff-sep { width: 1px; margin: 3px 2px; }
+.buff-wrap[data-layout="vertical"] .buff-sep { height: 1px; margin: 2px 3px; }

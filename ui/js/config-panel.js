@@ -21,11 +21,11 @@
   const OPACITY_KEY = 'aion2dps.opacity';
   const SEEN_KEY = 'aion2dps.config.seen';
   /** Settings that show a NEW badge until Config has been closed once after seeing them. */
-  const FRESH = ['auto_save_after_boss', 'toasts_only_when_aion2', 'check_updates_automatically', 'overlay_opacity', 'debug_pets', 'debug_position', 'debug_cubes', 'pet_toasts', 'pet_toast_secs'];
+  const FRESH = ['auto_save_after_boss', 'toasts_only_when_aion2', 'check_updates_automatically', 'overlay_opacity', 'debug_pets', 'debug_position', 'debug_cubes', 'pet_toasts', 'pet_toast_secs', 'buff_enabled', 'buff_layout', 'buff_show_all', 'buff_skills'];
   const SAVED_MS = 2400;
   const STATUS_MS = 6000;
   /** Sections with a NEW badge in the sidebar until Config has been closed once. */
-  const FRESH_SECTIONS = ['toasts'];
+  const FRESH_SECTIONS = ['toasts', 'buffs'];
   /** Dark fills for a toast background. */
   const DARK = ['#161a21', '#0b0f14', '#101d25', '#1e1b2e', '#102016', '#251d12'];
   const LIGHT = ['#e6e9ef', '#ffffff', '#fde68a', '#a5f3fc', '#bbf7d0', '#fbcfe8'];
@@ -40,6 +40,7 @@
     exploration: '<circle cx="8" cy="8" r="5.5"/><path d="M10.3 5.7L9 9 5.7 10.3 7 7z"/>',
     pets: '<circle cx="4.5" cy="6" r="1.3"/><circle cx="7" cy="3.8" r="1.3"/><circle cx="10" cy="4.3" r="1.3"/><circle cx="12" cy="7" r="1.3"/><path d="M5.5 12.5c0-2 1.5-3.8 3.3-3.8s2.7 1.8 2.7 3c0 1.3-1.3 1.4-3 1.1-1.5-.3-3 .9-3-.3z"/>',
     achievements: '<path d="M5 2.5h6v3a3 3 0 0 1-6 0zM5 3.5H2.8a2 2 0 0 0 2.4 3M11 3.5h2.2a2 2 0 0 1-2.4 3M8 8.5v3M5.5 13.5h5M6.5 11.5h3"/>',
+    buffs: '<rect x="2" y="5" width="5" height="6" rx="1.2"/><rect x="9" y="5" width="5" height="6" rx="1.2"/><path d="M4.5 7v2M3.5 8h2M10.5 8h2"/>',
     toasts: '<rect x="2.5" y="3.5" width="11" height="6" rx="1.5"/><path d="M5 6.5h4.5M4.5 12.5h7"/>',
     advanced: '<path d="M9.8 2.7a3.2 3.2 0 0 0-3.9 4.1L2.6 10.1a1.1 1.1 0 0 0 0 1.6l1.7 1.7a1.1 1.1 0 0 0 1.6 0l3.3-3.3a3.2 3.2 0 0 0 4.1-3.9l-1.9 1.9-1.9-.4-.4-1.9z"/>',
   };
@@ -55,6 +56,11 @@
   let current = 'general';
   let toastKind = 'upcoming';
   let previewHost = null;
+  let previewBar = null;
+  /** Config's buff skill picker: the choices (loaded on demand) and its search text. */
+  let skillOptions = null;
+  let skillsLoading = false;
+  let pickQuery = '';
   let pageHost = null;
   let query = '';
   const openAdvanced = new Set();
@@ -99,6 +105,17 @@
     return changed;
   }
 
+  /** The buff bar settings from each snapshot (`buff_settings`). */
+  function readBuffs(b) {
+    if (!b) return false;
+    let changed = false;
+    for (const d of defs) {
+      if (d.store !== 'buffs' || busy.has(d.id) || !(d.key in b)) continue;
+      if (!schema.same(vals[d.id], b[d.key])) { vals[d.id] = b[d.key]; changed = true; }
+    }
+    return changed;
+  }
+
   /** The toast styles from each snapshot (`toast_styles`). */
   function readToasts(map) {
     if (!map) return false;
@@ -131,10 +148,11 @@
       x = (room[0] * st.x_pct) / 100;
       y = (room[1] * st.y_pct) / 100;
     } else {
-      const pos = st.position === 'auto' ? (kind === 'cube' ? 'top' : (alertSettings && alertSettings.position) || 'top') : st.position;
+      const own = kind === 'cube' || kind === 'buffs';
+      const pos = st.position === 'auto' ? (own ? 'top' : (alertSettings && alertSettings.position) || 'top') : st.position;
       const col = /left$/.test(pos) ? 0 : /right$/.test(pos) ? 2 : 1;
       const row = /^top/.test(pos) ? 0 : /^bottom/.test(pos) ? 2 : 1;
-      const m = kind === 'cube' ? 8 : MARGIN;
+      const m = own ? 8 : MARGIN;
       x = col === 0 ? m : col === 2 ? room[0] - m : room[0] / 2;
       y = row === 0 ? m : row === 2 ? room[1] - m - 40 : room[1] / 2;
     }
@@ -204,6 +222,7 @@
   function styleOf(kind) {
     const s = tstyles.defaults(kind);
     for (const d of defs) if (d.store === 'toast' && d.toastKind === kind && vals[d.id] !== undefined) s[d.key] = vals[d.id];
+    if (kind === 'buffs') s.layout = vals.buff_layout || 'horizontal';
     return s;
   }
 
@@ -217,6 +236,7 @@
     if (d.id === 'you_color') { pcApi.writeYouColor(v); return; }
     if (d.id === 'overlay_opacity') { localStorage.setItem(OPACITY_KEY, (v / 100).toFixed(1)); return; }
     if (d.store === 'toast') return bridge.setToastStyle(d.toastKind, { [d.key]: v });
+    if (d.store === 'buffs') { readBuffs(await bridge.setBuffSettings({ [d.key]: v })); return; }
     if (d.store === 'alerts') {
       if (!alertSettings) throw new Error('Alerts are not loaded yet.');
       const next = JSON.parse(JSON.stringify(alertSettings));
@@ -331,7 +351,7 @@
   // ---- drawing ------------------------------------------------------------
 
   const lockedByEnv = (d) => Boolean(d.env && env[d.env]);
-  const disabled = (d) => lockedByEnv(d) || (d.dependsOn && vals[d.dependsOn] === false);
+  const disabled = (d) => lockedByEnv(d) || (d.dependsOn && vals[d.dependsOn] === false) || (d.id === 'buff_skills' && vals.buff_show_all !== false);
   const sectionOf = (id) => schema.SECTIONS.find((s) => s.id === id);
 
   function mark(text) {
@@ -378,6 +398,7 @@
         return `<span class="cfg-swatches">${pcApi.PRESETS.map((c) => `<button type="button" data-act="swatch" data-v="${c}" style="--c:${c}" class="${c === v ? 'on' : ''}" aria-label="${c}"></button>`).join('')}<input type="color" data-act="color" value="${esc(v || d.default)}" aria-label="Custom colour"></span>`;
       case 'action':
         return `<button type="button" class="btn small cfg-action" data-act="${d.action}">${esc(d.button)} <span aria-hidden="true">\u203a</span></button>`;
+      case 'skills': return skillPicker(d, v || [], off);
       default: return '';
     }
   }
@@ -395,7 +416,7 @@
     const reset = mod && !lockedByEnv(d)
       ? `<button type="button" class="cfg-reset" data-act="reset" title="Reset to ${esc(schema.describe(d, d.default, bossLock.formatDamage))}">${RESET_ICON}</button>`
       : '<span class="cfg-reset-gap"></span>';
-    const wide = ['stepper', 'damage', 'slider', 'segmented', 'multi', 'select', 'color', 'text', 'tcolor', 'spot'].includes(d.type) ? ' wide-ctl' : '';
+    const wide = ['stepper', 'damage', 'slider', 'segmented', 'multi', 'select', 'color', 'text', 'tcolor', 'spot'].includes(d.type) ? ' wide-ctl' : d.type === 'skills' ? ' block' : '';
     return `<div class="cfg-row${mod ? ' mod' : ''}${disabled(d) && !lockedByEnv(d) ? ' dim' : ''}${wide}" data-id="${d.id}">
       <div class="cfg-text"><div class="cfg-label">${mod ? '<i class="cfg-dot" title="Changed from default"></i>' : ''}<span>${mark(d.label)}</span>${badges.join('')}${savedChip}</div>
       <div class="cfg-desc">${query ? mark(desc) : esc(desc)}</div></div>
@@ -432,6 +453,7 @@
     } else if (current === 'toasts') {
       html = toastsContent();
     } else {
+      if (current === 'buffs' && !skillOptions) loadSkillOptions();
       const sec = sectionOf(current);
       const list = schema.inSection(defs, current);
       const canReset = resetList(list).length > 0;
@@ -474,6 +496,7 @@
   function toastOff(kind) {
     if (kind === 'pet') return vals.pet_toasts === false;
     if (kind === 'cube') return vals.hidden_cube_alerts === false;
+    if (kind === 'buffs') return vals.buff_enabled === false;
     return vals[`toast.${kind}.enabled`] === false;
   }
 
@@ -488,9 +511,17 @@
   /** Draw the selected type's sample into the preview card. */
   function paintPreview() {
     if (previewHost) { previewHost.destroy(); previewHost = null; }
+    if (previewBar) { previewBar.destroy(); previewBar = null; }
     const stage = $('#cfg-tp-stage');
     if (!stage) return;
     const style = styleOf(toastKind);
+    if (toastKind === 'buffs') {
+      stage.innerHTML = '';
+      stage.classList.add('buffs');
+      previewBar = window.buffBar.create(stage);
+      previewBar.update(window.buffBar.sample(), { ...style, position: 'top' }, style.layout);
+      return;
+    }
     if (toastKind === 'cube') {
       const t = cubeText(style);
       stage.innerHTML = `<aside class="cfg-cube">${CUBE_ICON}<div class="cube-copy"><strong class="cube-title">${esc(t.title)}</strong><span class="cube-subline">${esc(t.subline)}</span></div></aside>`;
@@ -512,6 +543,9 @@
       if (kind === 'cube') {
         if (!bridge.inApp) { setStatus('The hidden cube test shows in the app.', 'idle'); return; }
         await bridge.testCubeToast();
+      } else if (kind === 'buffs') {
+        if (!bridge.inApp) { setStatus('The buff bar test shows in the app.', 'idle'); return; }
+        await bridge.testBuffBar();
       } else {
         const now = Date.now();
         const extra = kind === 'pet' ? { hideMs: (Number(vals.pet_toast_secs) || 60) * 1000 } : { key: `test:${kind}:${now}`, hideMs: 8000, snooze: false };
@@ -524,6 +558,60 @@
     } catch (err) {
       setStatus(`Test toast: ${String((err && err.message) || err || 'could not show it.')}`, 'bad');
     }
+  }
+
+  // ---- buff skill picker -------------------------------------------------
+
+  async function loadSkillOptions() {
+    if (skillsLoading) return;
+    skillsLoading = true;
+    try { skillOptions = await bridge.buffSkills(); } catch (_) { skillOptions = []; }
+    skillsLoading = false;
+    render();
+  }
+
+  /** Initials tile, or the icon once the app has it cached (seen skills download theirs). */
+  function skillFace(o) {
+    const url = o.icon && window.buffBar.iconUrl(o.icon, () => paintSkillIcon(o), o.seen);
+    if (url) return `<img alt="" src="${url}">`;
+    return `<span class="cfg-skill-tx" style="--h:${window.buffBar.hue(o.skill)}">${esc(window.buffBar.initials(o))}</span>`;
+  }
+
+  function paintSkillIcon(o) {
+    panel.querySelectorAll(`.cfg-skill[data-v="${o.skill}"] .cfg-skill-ic`).forEach((el) => { el.innerHTML = skillFace(o); });
+  }
+
+  const skillText = (o) => `${o.name} ${o.class || ''} ${o.skill}`.toLowerCase();
+
+  function filterSkills(box) {
+    if (!box) return;
+    const q = pickQuery.trim().toLowerCase();
+    let shown = 0;
+    box.querySelectorAll('.cfg-skill').forEach((el) => {
+      const hit = !q || el.dataset.q.includes(q);
+      el.hidden = !hit;
+      if (hit) shown += 1;
+    });
+    const none = box.querySelector('.cfg-skills-none');
+    if (none) none.hidden = shown > 0;
+  }
+
+  function skillPicker(d, picked, off) {
+    if (!skillOptions) return '<span class="cfg-desc">Loading skills\u2026</span>';
+    const known = new Set(skillOptions.map((o) => o.skill));
+    const list = [...skillOptions, ...picked.filter((id) => !known.has(id)).map((id) => ({ skill: id, name: `Unknown #${id}`, named: false, icon: null, class: null, seen: false }))];
+    const q = pickQuery.trim().toLowerCase();
+    const items = list.map((o) => {
+      const on = picked.includes(o.skill);
+      const meta = o.seen ? `Seen${o.class ? ` \u00b7 ${o.class}` : ''}` : (o.class || (o.named ? '' : 'No name yet'));
+      const hide = q && !skillText(o).includes(q) ? ' hidden' : '';
+      return `<button type="button" class="cfg-skill${on ? ' on' : ''}" data-act="skill-pick" data-v="${o.skill}" data-q="${esc(skillText(o))}" aria-pressed="${on}" title="${esc(`${o.name} (${o.skill})`)}"${hide}${off}>
+        <span class="cfg-skill-ic">${skillFace(o)}</span><span class="cfg-skill-name">${esc(o.name)}</span><span class="cfg-skill-meta">${esc(meta)}</span><i class="cfg-skill-check">${on ? CHECK : ''}</i></button>`;
+    }).join('');
+    return `<div class="cfg-skills${off ? ' off' : ''}">
+      <div class="cfg-skills-head"><input class="cfg-input" data-act="skill-q" value="${esc(pickQuery)}" placeholder="Search skills or class" spellcheck="false" aria-label="Search skills"${off}>
+      <span class="cfg-unit">${picked.length} picked</span><button type="button" class="btn small" data-act="skill-clear"${picked.length && !off ? '' : ' disabled'}>Clear</button></div>
+      <div class="cfg-skills-list">${items}<div class="cfg-skills-none"${list.some((o) => !q || skillText(o).includes(q)) ? ' hidden' : ''}>No skill matches.</div></div></div>`;
   }
 
   function renderNav() {
@@ -620,6 +708,14 @@
       case 'toast-test': sendTest(); break;
       case 'place-screen': placeOnScreen(d.toastKind); break;
       case 'events': manageEvents(); break;
+      case 'buff-place': current = 'toasts'; toastKind = 'buffs'; render(); $('#cfg-content').scrollTop = 0; break;
+      case 'skill-pick': {
+        const x = Number(act.dataset.v);
+        const cur = vals[d.id] || [];
+        apply([{ d, v: cur.includes(x) ? cur.filter((y) => y !== x) : [...cur, x] }]);
+        break;
+      }
+      case 'skill-clear': apply([{ d, v: [] }]); break;
       default: break;
     }
   });
@@ -642,6 +738,7 @@
   });
   panel.addEventListener('input', (event) => {
     const el = event.target;
+    if (el.dataset.act === 'skill-q') { pickQuery = el.value; filterSkills(el.closest('.cfg-skills')); return; }
     if (el.dataset.act === 'range') {
       const d = rowDef(el);
       el.parentElement.querySelector('.cfg-range-val').textContent = schema.describe(d, Number(el.value));
@@ -700,6 +797,7 @@
     const other = alertsPanel();
     if (other && !other.hidden) { const x = other.querySelector('[data-close]'); if (x) x.click(); }
     readLocal();
+    skillOptions = null;
     panel.hidden = false;
     button.classList.add('on');
     setStatus('All changes saved', 'idle');
@@ -729,10 +827,11 @@
   readLocal();
   window.configPanel = {
     /** Live settings from each snapshot. */
-    update(settings, toastStyles) {
+    update(settings, toastStyles, buffSettings) {
       if (!settings) return;
       const styled = readToasts(toastStyles);
-      const changed = readSettings(settings) || styled;
+      const buffed = readBuffs(buffSettings);
+      const changed = readSettings(settings) || styled || buffed;
       const typing = panel.contains(document.activeElement) && document.activeElement.matches('input, select');
       if (changed && !panel.hidden && !typing) render();
     },

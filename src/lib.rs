@@ -19,6 +19,8 @@ pub mod monster_names;
 pub mod reassembly;
 pub mod sessions;
 pub mod skills;
+pub mod skill_icons;
+pub mod effects;
 pub mod death_debug;
 pub mod spawn_debug;
 pub mod state;

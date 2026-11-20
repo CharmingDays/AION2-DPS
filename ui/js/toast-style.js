@@ -20,6 +20,9 @@
     { id: 'cube', label: 'Hidden cube', short: 'Cube', event: false,
       title: '{title}', message: '{subline}', fields: ['title', 'type', 'distance', 'subline'],
       help: 'A hidden cube nearby, out of range or opened.' },
+    { id: 'buffs', label: 'Buff bar', short: 'Buffs', event: false, bar: true,
+      title: '', message: '', fields: [], skip: ['sound', 'title', 'message', 'show_icon'],
+      help: 'Your buffs, then your debuffs on the target, in one line. Which skills show: Config \u203a Buffs & debuffs.' },
   ];
 
   const POSITIONS = [
@@ -29,16 +32,16 @@
     ['custom', 'Custom (anywhere)'],
   ];
   const LIMITS = { scale: [70, 150], offset: 1000, pct: [0, 100], monitor: 6, font: [10, 32], opacity: [20, 100], title: 80, message: 160 };
-  const FONT = { upcoming: 13, imminent: 13, live: 13, pet: 14, cube: 23 };
+  const FONT = { upcoming: 13, imminent: 13, live: 13, pet: 14, cube: 23, buffs: 11 };
   /** Built-in backgrounds, for opacity without a custom colour. */
   const BACKGROUND = { cube: '#101d25' };
   const PANEL = '#161a21';
 
   function defaults(kind) {
     return {
-      enabled: true, scale: 100, position: 'auto', offset_x: 0, offset_y: 0, x_pct: 50, y_pct: 10, monitor: 0,
+      enabled: true, scale: 100, position: 'auto', offset_x: 0, offset_y: kind === 'buffs' ? 160 : 0, x_pct: 50, y_pct: 10, monitor: 0,
       title: '', message: '', font_px: FONT[kind] || 13,
-      accent: '', background: '', text: '', bg_opacity: 100, show_icon: true, sound: 'default',
+      accent: '', background: '', text: '', bg_opacity: kind === 'buffs' ? 70 : 100, show_icon: true, sound: 'default',
     };
   }
 
@@ -92,8 +95,13 @@
   }
 
   /** About the logical size of a `kind` toast at 100% (as src-tauri's toast_size). */
-  const SIZE = { cube: [460, 140], pet: [520, 84] };
-  const sizeOf = (kind, style) => (SIZE[kind] || [520, 64]).map((n) => (n * (Number(style && style.scale) || 100)) / 100);
+  const SIZE = { cube: [460, 140], pet: [520, 84], buffs: [600, 64] };
+  /** The buff bar turns on its side when `style.layout` (from its own settings) is vertical. */
+  function sizeOf(kind, style) {
+    let size = SIZE[kind] || [520, 64];
+    if (kind === 'buffs' && style && style.layout === 'vertical') size = [size[1], size[0]];
+    return size.map((n) => (n * (Number(style && style.scale) || 100)) / 100);
+  }
 
   /** Whether this toast plays the chime; `alertsSound` is Event alerts > Sound. */
   const soundOn = (style, alertsSound) => style.sound === 'on' || (style.sound === 'default' && Boolean(alertsSound));

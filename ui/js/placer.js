@@ -38,7 +38,10 @@
     size = info.size;
     box.style.width = `${size[0]}px`;
     box.style.height = `${size[1]}px`;
-    if (kind === 'cube') {
+    if (kind === 'buffs') {
+      const bar = window.buffBar.create(box);
+      bar.update(window.buffBar.sample(), style, info.layout);
+    } else if (kind === 'cube') {
       const cube = document.createElement('div');
       cube.className = 'pl-cube';
       cube.textContent = style.title ? styles.fill(style.title, { title: 'Hidden Cube nearby', type: 'Hidden Cube', distance: '42 m', subline: '' }) : 'Hidden Cube nearby';

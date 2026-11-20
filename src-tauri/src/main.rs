@@ -654,8 +654,8 @@ async fn place_toast(app: AppHandle, kind: String) -> Result<Option<serde_json::
     }
     let style = app.state::<Arc<AppState>>().toast_style(&kind);
     let (origin, screen) = monitor_rect(&app, style.monitor).ok_or("no monitor found")?;
-    let size = toast_size(&kind, &style);
-    let (fallback, margin) = if kind == "cube" { ("top", 8.0) } else { (alerts_place(&app), TOAST_MARGIN) };
+    let size = if kind == "buffs" { buff_place(&app).0 } else { toast_size(&kind, &style) };
+    let (fallback, margin) = if matches!(kind.as_str(), "cube" | "buffs") { ("top", 8.0) } else { (alerts_place(&app), TOAST_MARGIN) };
     let at = toast_style::place(&style, fallback, origin, screen, size, margin);
     finish_placing(&app, None, None);
     if let Some(old) = app.get_webview_window(PLACER) {
@@ -665,7 +665,8 @@ async fn place_toast(app: AppHandle, kind: String) -> Result<Option<serde_json::
     let seq = {
         let placer = app.state::<Placer>();
         let seq = placer.seq.fetch_add(1, Ordering::Relaxed) + 1;
-        let info = serde_json::json!({ "kind": kind, "style": style, "size": [size.0, size.1], "at": [at.0 - origin.0, at.1 - origin.1] });
+        let layout = app.state::<Arc<AppState>>().buff_settings().layout;
+        let info = serde_json::json!({ "kind": kind, "style": style, "size": [size.0, size.1], "at": [at.0 - origin.0, at.1 - origin.1], "layout": layout });
         *placer.now.lock().unwrap() = Some(Placing { seq, info, screen, size, reply });
         seq
     };
@@ -709,6 +710,50 @@ fn placer_done(app: AppHandle, at: Option<(f64, f64)>) {
 #[tauri::command]
 fn test_cube_toast(app: AppHandle) {
     let _ = app.emit_to(CUBE, "cube-test", ());
+}
+
+/// Config's "Send test toast" for the buff bar: a few sample icons for a few
+/// seconds. Nothing is read from or sent to the game.
+#[tauri::command]
+fn test_buff_bar(app: AppHandle) {
+    let _ = app.emit_to(BUFFS, "buffs-test", ());
+}
+
+/// Config > Buffs & debuffs: some of enabled, layout, show_all, skills.
+#[tauri::command]
+fn set_buff_settings(app: AppHandle, state: State<'_, Arc<AppState>>, patch: serde_json::Value) -> Result<aion2dps::effects::BuffSettings, String> {
+    let next = state.set_buff_settings(&patch)?;
+    // A new layout changes the window's shape: refit it if it is up.
+    if let Some(window) = app.get_webview_window(BUFFS) {
+        if window.is_visible().unwrap_or(false) {
+            fit_buff_window(&app, &window);
+        }
+    }
+    Ok(next)
+}
+
+#[tauri::command]
+fn buff_skills(state: State<'_, Arc<AppState>>) -> Vec<aion2dps::effects::SkillOption> {
+    state.buff_skill_options()
+}
+
+/// A skill icon as a `data:` URL. The first time, it is downloaded from
+/// aion2data.com (names from the bundled table only) and cached on this PC;
+/// `download: false` only reads the cache (Config's long skill list).
+#[tauri::command]
+async fn skill_icon(icon: String, download: Option<bool>) -> Option<String> {
+    if let Some(url) = aion2dps::skill_icons::cached(&icon) {
+        return Some(url);
+    }
+    if download == Some(false) {
+        return None;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        aion2dps::skill_icons::fetch(&icon).then(|| aion2dps::skill_icons::cached(&icon)).flatten()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[tauri::command]
@@ -877,6 +922,69 @@ fn cube_visible(app: AppHandle, show: bool) {
         let _ = window.set_position(tauri::LogicalPosition::new(x, y));
         let _ = window.show();
         let _ = window.set_always_on_top(true);
+    } else {
+        let _ = window.hide();
+    }
+}
+
+const BUFFS: &str = "buffs";
+/// One line of icons at 100%: about 14 icons long.
+const BUFF_LINE: (f64, f64) = (600.0, 64.0);
+
+/// The buff bar window's size (its layout and Size) and top-left corner,
+/// per Config > Toasts & pop-ups > Buff bar (`auto` is the top center).
+fn buff_place(app: &AppHandle) -> ((f64, f64), (f64, f64)) {
+    let state = app.state::<Arc<AppState>>();
+    let style = state.toast_style("buffs");
+    let k = f64::from(style.scale) / 100.0;
+    let size = if state.buff_settings().layout == "vertical" {
+        (BUFF_LINE.1 * k, BUFF_LINE.0 * k)
+    } else {
+        (BUFF_LINE.0 * k, BUFF_LINE.1 * k)
+    };
+    (size, styled_origin(app, &style, "top", size, 8.0))
+}
+
+fn fit_buff_window(app: &AppHandle, window: &WebviewWindow) {
+    let ((w, h), (x, y)) = buff_place(app);
+    let _ = window.set_size(LogicalSize::new(w, h));
+    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+}
+
+/// The buff bar: hidden until the page has icons to show. It never takes
+/// focus or clicks; they go to the game.
+fn open_buff_window(app: &AppHandle) {
+    let ((w, h), (x, y)) = buff_place(app);
+    let built = WebviewWindowBuilder::new(app, BUFFS, WebviewUrl::App("buffs.html".into()))
+        .title("aion2dps buffs")
+        .inner_size(w, h)
+        .position(x, y)
+        .visible(false)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .focusable(false)
+        .focused(false)
+        .build();
+    match built {
+        Ok(window) => {
+            let _ = window.set_ignore_cursor_events(true);
+        }
+        Err(err) => tracing::warn!(target: "buffs", "buff bar window did not open: {err}"),
+    }
+}
+
+#[tauri::command]
+fn buffs_visible(app: AppHandle, show: bool) {
+    let Some(window) = app.get_webview_window(BUFFS) else { return };
+    if show {
+        fit_buff_window(&app, &window);
+        let _ = window.show();
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_ignore_cursor_events(true);
     } else {
         let _ = window.hide();
     }
@@ -1379,6 +1487,11 @@ fn main() {
             set_debug_logs,
             set_toast_style,
             test_cube_toast,
+            test_buff_bar,
+            set_buff_settings,
+            buff_skills,
+            skill_icon,
+            buffs_visible,
             place_toast,
             placer_info,
             placer_done,
@@ -1492,6 +1605,7 @@ fn main() {
                 reveal_on_capture_failure(handle.clone(), state.clone());
             }
             open_cube_window(&handle);
+            open_buff_window(&handle);
             tray_watch::start_watcher(handle.clone(), state.clone());
             updater::start_background(handle.clone());
             push_snapshots(handle, state, windowless);

@@ -101,6 +101,8 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> std::io::Result<u16> {
         .route("/api/mode", post(mode))
         .route("/api/settings", post(settings))
         .route("/api/toast-style", post(toast_style))
+        .route("/api/buffs/settings", post(buff_settings))
+        .route("/api/buffs/skills", get(buff_skills))
         .route("/api/unlock", post(unlock))
         .route("/api/history/clear", post(clear_history))
         .route("/api/monster-names", get(monster_names))
@@ -312,6 +314,22 @@ async fn toast_style(
         Ok(()) => (StatusCode::NO_CONTENT, String::new()),
         Err(err) => (StatusCode::BAD_REQUEST, err),
     }
+}
+
+/// Config > Buffs & debuffs: any of enabled, layout, show_all, skills.
+async fn buff_settings(
+    State(state): State<Arc<AppState>>,
+    Json(patch): Json<serde_json::Value>,
+) -> Response {
+    match state.set_buff_settings(&patch) {
+        Ok(settings) => Json(settings).into_response(),
+        Err(err) => (StatusCode::BAD_REQUEST, err).into_response(),
+    }
+}
+
+/// The skills Config's buff picker offers.
+async fn buff_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    ([(header::CACHE_CONTROL, "no-store")], Json(state.buff_skill_options()))
 }
 
 async fn unlock(State(state): State<Arc<AppState>>) -> StatusCode {

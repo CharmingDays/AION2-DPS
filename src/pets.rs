@@ -418,7 +418,7 @@ pub fn cached_icon(id: u32) -> Option<String> {
     is_webp(&bytes).then(|| format!("data:image/webp;base64,{}", base64(&bytes)))
 }
 
-fn is_webp(bytes: &[u8]) -> bool {
+pub(crate) fn is_webp(bytes: &[u8]) -> bool {
     bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
 }
 
@@ -433,17 +433,23 @@ pub fn fetch_icon(id: u32) -> bool {
         return true;
     }
     let url = data().icon_url.replace("{icon}", name);
+    download_webp(&url, &path)
+}
+
+/// Download one `.webp` from an https data-site URL to `path`, through a temp
+/// file. Blocking (up to about 10 s). Also used for skill icons.
+pub(crate) fn download_webp(url: &str, path: &std::path::Path) -> bool {
     if !url.starts_with("https://") {
         return false;
     }
-    if std::fs::create_dir_all(icon_dir()).is_err() {
+    if path.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_err()) {
         return false;
     }
     let temp = crate::storage::temp_path(&path);
     let mut curl = std::process::Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
     curl.args(["-sSfL", "--max-time", "10", "--max-filesize", "2000000", "-o"])
         .arg(&temp)
-        .arg(&url)
+        .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -455,14 +461,14 @@ pub fn fetch_icon(id: u32) -> bool {
     }
     let ok = curl.status().is_ok_and(|s| s.success())
         && std::fs::read(&temp).is_ok_and(|b| is_webp(&b))
-        && std::fs::rename(&temp, &path).is_ok();
+        && std::fs::rename(&temp, path).is_ok();
     if !ok {
         let _ = std::fs::remove_file(&temp);
     }
     ok
 }
 
-fn base64(bytes: &[u8]) -> String {
+pub(crate) fn base64(bytes: &[u8]) -> String {
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {

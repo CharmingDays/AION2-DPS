@@ -110,6 +110,8 @@ fn decode_loop(rx: Receiver<Segment>, state: Arc<AppState>, mut debug: Option<Ta
                 || locks;
             if identifies_server && cube_flow != Some(flow) {
                 state.with_cubes(|cubes| cubes.reset_world());
+                // A new connection (login, zone or channel change): old buffs are gone.
+                state.clear_effects();
                 cube_flow = Some(flow);
             }
             let mut cube_packets = vec![frame.packet.clone()];
@@ -149,6 +151,7 @@ fn decode_loop(rx: Receiver<Segment>, state: Arc<AppState>, mut debug: Option<Ta
             if locks {
                 assembler.lock_port(frame.src_port);
             }
+            state.apply_effects(&events, now);
             let hit_count = events
                 .iter()
                 .filter(|event| matches!(event, Event::Hit(_)))

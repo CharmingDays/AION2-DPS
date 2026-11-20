@@ -429,7 +429,7 @@
     renderRecent(m);
     renderHistory(data.history || []);
     renderCapture(data.capture);
-    if (data.settings) window.configPanel.update(data.settings, data.toast_styles);
+    if (data.settings) window.configPanel.update(data.settings, data.toast_styles, data.buff_settings);
     if (window.updates) window.updates.sync(data);
   }
 
