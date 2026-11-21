@@ -120,7 +120,7 @@
       const canInstall = Boolean(current.asset);
       view({
         msg: canInstall
-          ? `Version ${current.latest} is available. You have v${current.current}. "Update now" downloads the installer${size}, checks it, installs it and restarts aion2dps.`
+          ? `Version ${current.latest} is available. You have v${current.current}. "Update now" downloads the installer${size}, checks it, installs it and restarts AION2 DPS.`
           : `Version ${current.latest} is available, but it has no Windows installer attached. Get it from the release page.`,
         notes: plainNotes(current.notes) || 'No release notes.',
         update: canInstall,
@@ -134,7 +134,7 @@
       sums: 'Getting SHA256SUMS.txt\u2026',
       download: 'Downloading\u2026',
       verify: 'Checking the SHA-256\u2026',
-      install: 'Starting the installer. aion2dps closes now and opens again when it is done.',
+      install: 'Starting the installer. AION2 DPS closes now and opens again when it is done.',
     };
     if (tauri.event) {
       tauri.event.listen('update-progress', ({ payload: p }) => {

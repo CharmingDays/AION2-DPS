@@ -39,5 +39,15 @@
   ${EndIf}
   aion2dps_npcap_done:
 
+  ; Previous per-user install lived in $LOCALAPPDATA\aion2dps, the same folder
+  ; that still holds sessions, alerts, logs and icon caches. Do not RMDir that
+  ; folder and do not run its uninstall.exe (that would wipe the data). Only
+  ; remove the old installer files, Start menu shortcut and uninstall key.
+  ; These deletes are safe if the old install is already gone.
+  Delete "$APPDATA\Microsoft\Windows\Start Menu\Programs\aion2dps.lnk"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\aion2dps"
+  Delete "$LOCALAPPDATA\aion2dps\uninstall.exe"
+  Delete "$LOCALAPPDATA\aion2dps\aion2dps.exe"
+
   Pop $0
 !macroend

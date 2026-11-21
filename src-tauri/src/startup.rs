@@ -64,3 +64,49 @@ fn run_elevated(script: &str) -> Result<(), String> {
 pub fn configure(_on: bool) -> Result<(), String> {
     Err("Start with Windows is only supported on Windows.".into())
 }
+
+/// If the "\Aion Tallymark" logon task exists and still points at another exe,
+/// retarget it at `exe --start-hidden`. Does not create the task, does not
+/// prompt for elevation, and is a no-op when the task is missing or already
+/// points here.
+#[cfg(windows)]
+pub fn repoint_existing(exe: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    let exe = exe.to_string_lossy().replace('\'', "''");
+    let script = format!(r#"
+$ErrorActionPreference = 'Stop'
+$task = Get-ScheduledTask -TaskPath '\' | Where-Object TaskName -EQ 'Aion Tallymark'
+if (-not $task) {{ exit 0 }}
+$current = [string]$task.Actions[0].Execute
+if ($current -ieq '{exe}') {{ exit 0 }}
+$user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+$action = New-ScheduledTaskAction -Execute '{exe}' -Argument '--start-hidden'
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName 'Aion Tallymark' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+"#);
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(0x0800_0000)
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            tracing::info!(target: "overlay", "Start with Windows now launches {}", exe);
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(
+                target: "overlay",
+                "could not retarget the Start with Windows task (no elevation prompt): {}",
+                err.trim()
+            );
+        }
+        Err(err) => tracing::warn!(target: "overlay", "could not retarget the Start with Windows task: {err}"),
+    }
+}
+
+#[cfg(not(windows))]
+pub fn repoint_existing(_exe: &std::path::Path) {}

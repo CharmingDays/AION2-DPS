@@ -29,6 +29,7 @@ mod app_log;
 mod tray_watch;
 mod updater;
 mod startup;
+mod migrate;
 
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -460,7 +461,7 @@ fn deliver(app: &AppHandle, toasts: &Toasts, mut toast: serde_json::Value) -> ta
     }
     let (x, y) = styled_origin(app, &style, fallback, (width, 80.0), TOAST_MARGIN);
     let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("toast.html".into()))
-        .title("aion2dps alert")
+        .title("AION2 DPS alert")
         .inner_size(width, 80.0)
         .position(x, y)
         .decorations(false)
@@ -671,7 +672,7 @@ async fn place_toast(app: AppHandle, kind: String) -> Result<Option<serde_json::
         seq
     };
     let window = WebviewWindowBuilder::new(&app, PLACER, WebviewUrl::App("placer.html".into()))
-        .title("aion2dps - place pop-up")
+        .title("AION2 DPS - place pop-up")
         .inner_size(screen.0, screen.1)
         .position(origin.0, origin.1)
         .decorations(false)
@@ -785,7 +786,7 @@ async fn open_meter(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn open_history(app: AppHandle) -> Result<(), String> {
-    show_page(&app, HISTORY, "history.html", "aion2dps - session history").map_err(|err| err.to_string())
+    show_page(&app, HISTORY, "history.html", "AION2 DPS - session history").map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -897,7 +898,7 @@ fn open_cube_window(app: &AppHandle) {
 fn build_cube_window(app: &AppHandle) -> tauri::Result<()> {
     let (x, y) = cube_origin(app);
     WebviewWindowBuilder::new(app, CUBE, WebviewUrl::App("cube.html".into()))
-        .title("aion2dps hidden cube")
+        .title("AION2 DPS hidden cube")
         .inner_size(CUBE_SIZE.0, CUBE_SIZE.1)
         .position(x, y)
         .visible(false)
@@ -956,7 +957,7 @@ fn fit_buff_window(app: &AppHandle, window: &WebviewWindow) {
 fn open_buff_window(app: &AppHandle) {
     let ((w, h), (x, y)) = buff_place(app);
     let built = WebviewWindowBuilder::new(app, BUFFS, WebviewUrl::App("buffs.html".into()))
-        .title("aion2dps buffs")
+        .title("AION2 DPS buffs")
         .inner_size(w, h)
         .position(x, y)
         .visible(false)
@@ -992,7 +993,7 @@ fn buffs_visible(app: AppHandle, show: bool) {
 
 fn build_overlay(app: &AppHandle) -> tauri::Result<()> {
     let window = WebviewWindowBuilder::new(app, OVERLAY, WebviewUrl::App("overlay.html".into()))
-        .title("aion2dps")
+        .title("AION2 DPS")
         .inner_size(aion2dps::overlay_layout::DEFAULT_SIZE.0, aion2dps::overlay_layout::DEFAULT_SIZE.1)
         .min_inner_size(OVERLAY_MIN.0, OVERLAY_MIN.1)
         // Hidden until the saved position and size are applied, so it does
@@ -1251,7 +1252,7 @@ fn close_overlay_to_tray(app: &AppHandle, api: &tauri::CloseRequestApi) {
     }
 }
 fn show_meter(app: &AppHandle) -> tauri::Result<()> {
-    show_page(app, METER, "index.html", "aion2dps - detailed meter")
+    show_page(app, METER, "index.html", "AION2 DPS - detailed meter")
 }
 
 /// Focus the window with this label, or open it on `page`.
@@ -1607,6 +1608,7 @@ fn main() {
             open_cube_window(&handle);
             open_buff_window(&handle);
             tray_watch::start_watcher(handle.clone(), state.clone());
+            std::thread::spawn(migrate::run);
             updater::start_background(handle.clone());
             push_snapshots(handle, state, windowless);
             Ok(())

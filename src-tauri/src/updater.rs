@@ -220,6 +220,21 @@ fn is_allowed_download_host(url: &str) -> bool {
     https_host(url).is_some_and(|host| DOWNLOAD_HOSTS.contains(&host.as_str()))
 }
 
+/// Prefer the historical `aion2dps_<ver>_x64-setup.exe` name, then the name
+/// Tauri derives from productName ("AION2 DPS"), then any `*_x64-setup.exe`.
+fn setup_asset<'a>(assets: &'a [(String, String, u64)], latest: &str) -> Option<&'a (String, String, u64)> {
+    let preferred = [
+        format!("aion2dps_{latest}_x64-setup.exe"),
+        format!("AION2 DPS_{latest}_x64-setup.exe"),
+    ];
+    for want in &preferred {
+        if let Some(asset) = assets.iter().find(|(name, ..)| name == want) {
+            return Some(asset);
+        }
+    }
+    assets.iter().find(|(name, ..)| name.ends_with("_x64-setup.exe"))
+}
+
 fn latest_release(current: &str) -> Result<(Vec<u8>, u32), String> {
     for (i, url) in LATEST_URLS.iter().enumerate() {
         tracing::info!(target: "update", "checking {url} (current {current})");
@@ -273,11 +288,7 @@ fn ask_github(current: &str) -> Result<Release, String> {
                 .collect()
         })
         .unwrap_or_default();
-    let want = format!("aion2dps_{latest}_x64-setup.exe");
-    let setup = assets
-        .iter()
-        .find(|(name, ..)| *name == want)
-        .or_else(|| assets.iter().find(|(name, ..)| name.ends_with("_x64-setup.exe")));
+    let setup = setup_asset(&assets, &latest);
     let sums_url = assets.iter().find(|(name, ..)| name == SUMS).map(|(_, url, _)| url.clone());
     let release = Release {
         check: Check {
@@ -645,6 +656,25 @@ mod tests {
         ] {
             assert!(!is_allowed_download_host(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn prefers_historical_then_product_name_installer() {
+        let assets = vec![
+            ("README.md".into(), "https://example/README.md".into(), 1u64),
+            ("AION2 DPS_0.3.15_x64-setup.exe".into(), "https://github.com/CharmingDays/aion-tallymark/releases/download/v0.3.15/AION2%20DPS_0.3.15_x64-setup.exe".into(), 10),
+            ("aion2dps_0.3.15_x64-setup.exe".into(), "https://github.com/CharmingDays/aion-tallymark/releases/download/v0.3.15/aion2dps_0.3.15_x64-setup.exe".into(), 11),
+        ];
+        let picked = setup_asset(&assets, "0.3.15").expect("an installer");
+        assert_eq!(picked.0, "aion2dps_0.3.15_x64-setup.exe");
+
+        let only_new = vec![(
+            "AION2 DPS_0.3.15_x64-setup.exe".into(),
+            "https://github.com/CharmingDays/AION2-DPS/releases/download/v0.3.15/AION2%20DPS_0.3.15_x64-setup.exe".into(),
+            10u64,
+        )];
+        let picked = setup_asset(&only_new, "0.3.15").expect("product-name installer");
+        assert_eq!(picked.0, "AION2 DPS_0.3.15_x64-setup.exe");
     }
 
     #[test]

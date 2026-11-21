@@ -86,7 +86,7 @@ fn ensure_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
-        .tooltip("aion2dps")
+        .tooltip("AION2 DPS")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {
                 // build_overlay is wired from main via a custom event.
