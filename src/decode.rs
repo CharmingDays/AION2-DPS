@@ -1130,8 +1130,10 @@ fn masked_names(packet: &[u8]) -> Vec<Event> {
             continue;
         };
         // A self record carries your server id after the name. Without it,
-        // the bytes are another record that only looks like one.
-        let you = is_self && server_follows(packet, end);
+        // a 33 36 found mid-packet may only look like one. A framed packet
+        // whose opcode is 33 36 is already a self record, even if the
+        // trailer is missing or the server id sits outside 1000..3000.
+        let you = is_self && (server_follows(packet, end) || opcode_at(packet) == Some(i));
         push_name(&mut events, id, name, you, !is_other);
         i = end;
     }
@@ -1613,6 +1615,14 @@ mod tests {
 
         packet.truncate(packet.len() - 2);
         assert_eq!(names_of(&packet), vec![(1234, "Aria".to_string(), false)]);
+    }
+
+    #[test]
+    fn a_framed_self_record_is_you_even_without_a_server_trailer() {
+        let mut body = vec![0x33, 0x36, 0xD2, 0x09, 0, 0, 0, 0, 0x01, 4];
+        body.extend(b"Aria");
+        let packet = crate::framing::encode_frame(&body);
+        assert_eq!(names_of(&packet), vec![(1234, "Aria".to_string(), true)]);
     }
 
     #[test]

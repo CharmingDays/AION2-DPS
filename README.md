@@ -1,6 +1,6 @@
-# Aion Tallymark
+# AION2 DPS
 
-A passive, listen-only DPS meter for AION 2 with a compact overlay, a detailed meter and session replay.
+A passive, listen-only DPS meter for AION 2 with a compact overlay, a detailed meter and session replay. Formerly Aion Tallymark.
 
 > Unofficial fan project. Not affiliated with, endorsed by or sponsored by NCSOFT. AION is a trademark of NCSOFT Corporation.
 
@@ -39,6 +39,8 @@ Design previews of the main windows. The shipped app may differ in small details
 - **Kill detection**: a *Defeated* badge when a monster dies.
 - **Boss lock**: the view stays on the boss while you fight it and for 10 s after it dies (adjustable, 0 to 60 s), so adds don't replace it. Other hits are still recorded.
 - **Toasts** for timers and saves, stacked two at a time.
+- **Local player highlight**: the meter marks you as soon as the server names your character, or on your first skill cast if that packet was missed, and follows you after loading screens when your entity id changes.
+- **Sorcerer ground spells**: damage from Bittercold Wind, Fire Wall and Cold Storm objects is folded into the caster on the live meter and in saved sessions, the same way spirit pets are.
 
 ## Passive and listen-only
 
@@ -56,10 +58,10 @@ The app reads copies of the game packets your PC already receives, through Npcap
 
 Get the files from the Releases page.
 
-- **Installer** (`aion2dps_<version>_x64-setup.exe`, recommended): installs for the current user, adds Start menu shortcuts, installs WebView2 if needed and reminds you about Npcap.
+- **Installer** (`AION2 DPS_<version>_x64-setup.exe`, also published as `aion2dps_<version>_x64-setup.exe` so older installs can auto-update): installs for the current user, adds Start menu shortcuts, installs WebView2 if needed and reminds you about Npcap. The app lives in `%LOCALAPPDATA%\AION2 DPS`; settings, sessions and logs stay in the existing `%APPDATA%\aion2dps` and `%LOCALAPPDATA%\aion2dps` folders.
 - **Portable exe** (`aion2dps.exe`): runs from anywhere with no install. You still need WebView2 and Npcap.
 
-**Updates**: click the version pill (circular arrows, next to the aion2dps title) in the detailed meter's top bar. The app asks GitHub for the latest release and, if it is newer, shows its notes with **Update now**, **Later** and **Skip this version**. **Update now** downloads the installer, checks its SHA-256 against the release's `SHA256SUMS.txt` (it refuses to run on a mismatch or a missing hash), starts it with a progress bar only, closes the app so its files can be replaced, and opens it again when done. Your settings, timers and sessions are kept. **Config > General > Check for updates automatically** (on by default) asks GitHub shortly after start and every hour, and marks the detailed meter's version pill and the overlay with a blue dot; a one-line banner under the overlay header shows the version. Each new version is announced once. Click the overlay banner to open the meter's update dialog, or click its × to hide the banner until the next version. Nothing is ever installed without your click, and the only traffic is to GitHub. The portable exe is not replaced; download the new one from the release page. You can still update by hand: run the new installer over the old install.
+**Updates**: click the version pill (circular arrows, next to the AION2 DPS title) in the detailed meter's top bar. The app asks GitHub for the latest release and, if it is newer, shows its notes with **Update now**, **Later** and **Skip this version**. **Update now** downloads the installer, checks its SHA-256 against the release's `SHA256SUMS.txt` (it refuses to run on a mismatch or a missing hash), starts it with a progress bar only, closes the app so its files can be replaced, and opens it again when done. Your settings, timers and sessions are kept. **Config > General > Check for updates automatically** (on by default) asks GitHub shortly after start and every hour, and marks the detailed meter's version pill and the overlay with a blue dot; a one-line banner under the overlay header shows the version. Each new version is announced once. Click the overlay banner to open the meter's update dialog, or click its × to hide the banner until the next version. Nothing is ever installed without your click, and the only traffic is to GitHub. The portable exe is not replaced; download the new one from the release page. You can still update by hand: run the new installer over the old install.
 
 ## Usage
 
@@ -97,11 +99,11 @@ npm run build               # release exe + NSIS installer
 ```
 
 - Exe: `src-tauri/target/release/aion2dps.exe`
-- Installer: `src-tauri/target/release/bundle/nsis/aion2dps_<version>_x64-setup.exe`
+- Installer: `src-tauri/target/release/bundle/nsis/AION2 DPS_<version>_x64-setup.exe`
 
 Without Node: `cargo run --manifest-path src-tauri/Cargo.toml -- --demo`.
 
-Releasing: the in-app updater reads the latest GitHub release, so each release needs the installer named `aion2dps_<version>_x64-setup.exe` (the tag is `v<version>`) and a `SHA256SUMS.txt` asset with one `<sha256>  <file name>` line per file (for example from `sha256sum` or `Get-FileHash`). Without the hash line, the app won't install the update.
+Releasing: the in-app updater reads the latest GitHub release (it tries `CharmingDays/AION2-DPS`, then `CharmingDays/aion-tallymark`). The tag is `v<version>`. Attach both `AION2 DPS_<version>_x64-setup.exe` (the file Tauri builds) and a copy named `aion2dps_<version>_x64-setup.exe` so v0.3.14 and earlier can auto-update, plus a `SHA256SUMS.txt` asset with one `<sha256>  <file name>` line per uploaded file (for example from `sha256sum` or `Get-FileHash`). Without the hash line, the app won't install the update.
 
 Tests:
 

@@ -542,8 +542,6 @@ pub struct Combat {
     resists: HashMap<i32, i32>,
     recent: VecDeque<Recent>,
     self_id: Option<i32>,
-    /// How many `4A 36` records in a row have named the same entity.
-    you_streak: Option<(i32, u32)>,
     last_target: Option<i32>,
     mode: TargetMode,
     first_ms: Option<i64>,
@@ -614,7 +612,6 @@ impl Combat {
             resists: HashMap::new(),
             recent: VecDeque::new(),
             self_id: None,
-            you_streak: None,
             last_target: None,
             mode: TargetMode::Current,
             first_ms: None,
@@ -979,7 +976,6 @@ impl Combat {
     fn remember_name(&mut self, id: i32, name: String, is_self: bool, trusted: bool) {
         if is_self {
             self.self_id = Some(id);
-            self.you_streak = None;
         }
         if name.is_empty() {
             return;
@@ -1769,7 +1765,6 @@ impl Combat {
             .map(|(id, _)| *id)
             .collect();
         keep.extend(self.self_id);
-        keep.extend(self.you_streak.map(|(id, _)| id));
         keep.extend(self.last_target);
         keep.extend(self.released);
         keep.extend(self.pinned);
@@ -2334,26 +2329,15 @@ impl Combat {
         }
     }
 
-    /// `4A 36` is only about the local player. One stray record is not enough;
-    /// three in a row for the same entity are.
+    /// `4A 36` is only about the local player. The decoder only emits
+    /// [`Event::You`] for a framed `4A 36` with a plausible entity id, so one
+    /// record is enough. A later id (a loading screen reassigns entities)
+    /// replaces a stale `self_id` immediately.
     fn note_you(&mut self, id: i32) {
         if !(100..=9_999_999).contains(&id) {
             return;
         }
-        if self.self_id == Some(id) {
-            self.you_streak = None;
-            return;
-        }
-        let streak = match self.you_streak {
-            Some((prev, n)) if prev == id => n + 1,
-            _ => 1,
-        };
-        if streak >= 3 {
-            self.self_id = Some(id);
-            self.you_streak = None;
-        } else {
-            self.you_streak = Some((id, streak));
-        }
+        self.self_id = Some(id);
     }
 
     /// A summon is shown under its owner when that link is known.
@@ -2400,22 +2384,28 @@ impl Combat {
     }
 
     /// The player this entity should be shown under: its summon owner when
-    /// known, else the unique Spiritmaster for an unlinked spirit pet.
+    /// known, else the unique Spiritmaster for an unlinked spirit pet, else
+    /// the unique Sorcerer for an unlinked ground-spell object.
     fn credited_actor(&self, id: i32) -> i32 {
         let owner = self.owner_of(id);
         if owner != id && self.trust_heal_actor(owner) {
             owner
+        } else if let Some(sm) = self.infer_spirit_owner(id) {
+            sm
         } else {
-            self.infer_spirit_owner(id).unwrap_or(owner)
+            self.infer_spell_object_owner(id).unwrap_or(owner)
         }
     }
 
     fn maybe_link_spirit(&mut self, actor: i32, skill: i32) {
-        if !crate::skills::is_spirit_skill(skill) {
-            return;
-        }
-        if let Some(owner) = self.infer_spirit_owner(actor) {
-            self.link(actor, owner);
+        if crate::skills::is_spirit_skill(skill) {
+            if let Some(owner) = self.infer_spirit_owner(actor) {
+                self.link(actor, owner);
+            }
+        } else if crate::skills::is_spell_object_skill(skill) {
+            if let Some(owner) = self.infer_spell_object_owner(actor) {
+                self.link(actor, owner);
+            }
         }
     }
 
@@ -2528,6 +2518,103 @@ impl Combat {
                 let matches: Vec<i32> = masters
                     .into_iter()
                     .filter(|sm| families.iter().all(|family| self.sm_has_family(*sm, family)))
+                    .collect();
+                if matches.len() == 1 {
+                    Some(matches[0])
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn acts_as_spell_object(&self, id: i32) -> bool {
+        let skills = self.actor_skills(id);
+        if skills.is_empty() {
+            return false;
+        }
+        skills.iter().all(|skill| crate::skills::is_spell_object_skill(*skill))
+    }
+
+    fn actor_spell_object_families(&self, id: i32) -> Vec<&'static str> {
+        let mut found = Vec::new();
+        for skill in self.actor_skills(id) {
+            if let Some(family) = crate::skills::spell_object_family(skill) {
+                if !found.contains(&family) {
+                    found.push(family);
+                }
+            }
+        }
+        found
+    }
+
+    fn sorcerers(&self) -> Vec<i32> {
+        let mut ids = HashSet::new();
+        for target in self.targets.values() {
+            for (actor_id, actor) in &target.actors {
+                if actor
+                    .skills
+                    .keys()
+                    .any(|(skill, _)| crate::skills::is_sorcerer_skill(*skill))
+                {
+                    ids.insert(self.owner_of(*actor_id));
+                }
+            }
+        }
+        for ((actor, skill, _), _) in &self.heal_skills {
+            if crate::skills::is_sorcerer_skill(*skill) {
+                ids.insert(self.owner_of(*actor));
+            }
+        }
+        let mut out: Vec<i32> = ids.into_iter().collect();
+        out.sort_unstable();
+        out
+    }
+
+    fn sorcerer_has_family(&self, mage: i32, family: &str) -> bool {
+        self.actor_skills(mage)
+            .into_iter()
+            .chain(self.linked_spell_object_skills(mage))
+            .any(|skill| crate::skills::spell_object_family(skill) == Some(family))
+    }
+
+    fn linked_spell_object_skills(&self, mage: i32) -> Vec<i32> {
+        let mut skills = Vec::new();
+        for target in self.targets.values() {
+            for (actor_id, actor) in &target.actors {
+                if self.owner_of(*actor_id) == mage && *actor_id != mage {
+                    skills.extend(actor.skills.keys().map(|(skill, _)| *skill));
+                }
+            }
+        }
+        skills
+    }
+
+    /// When this unlinked ground-spell object can be attributed to one Sorcerer.
+    fn infer_spell_object_owner(&self, id: i32) -> Option<i32> {
+        let owner = self.owner_of(id);
+        if owner != id && self.trust_heal_actor(owner) {
+            return None;
+        }
+        let object = if self.acts_as_spell_object(id) {
+            id
+        } else if owner != id && self.acts_as_spell_object(owner) {
+            owner
+        } else {
+            return None;
+        };
+        let mages = self.sorcerers();
+        match mages.len() {
+            1 => Some(mages[0]),
+            n if n > 1 => {
+                let families = self.actor_spell_object_families(object);
+                if families.is_empty() {
+                    return None;
+                }
+                let matches: Vec<i32> = mages
+                    .into_iter()
+                    .filter(|mage| families.iter().all(|family| self.sorcerer_has_family(*mage, family)))
                     .collect();
                 if matches.len() == 1 {
                     Some(matches[0])
@@ -2919,17 +3006,70 @@ mod tests {
     }
 
     #[test]
-    fn three_stats_records_mark_your_existing_name() {
+    fn one_you_record_marks_your_existing_name() {
         let mut combat = Combat::new();
         combat.set_name(420, "Naicha", false);
         combat.apply_hit(&hit(420, 9, 100, 10), 0);
+        assert!(!combat.snapshot(0).players[0].you);
         combat.apply(Event::You { id: 420 }, 0);
-        combat.apply(Event::You { id: 420 }, 1);
-        assert!(!combat.snapshot(1).players[0].you);
-        combat.apply(Event::You { id: 420 }, 2);
-        let snap = combat.snapshot(2);
+        let snap = combat.snapshot(0);
         assert_eq!(snap.players[0].name, "Naicha");
         assert!(snap.players[0].you);
+    }
+
+    #[test]
+    fn a_you_record_replaces_a_stale_self_id_after_a_loading_screen() {
+        let mut combat = Combat::new();
+        combat.set_name(420, "Naicha", false);
+        combat.apply(Event::You { id: 420 }, 0);
+        combat.apply_hit(&hit(420, 9, 100, 10), 0);
+        assert!(combat.snapshot(0).players[0].you);
+        assert_eq!(combat.you(), Some(420));
+        combat.set_name(421, "Naicha", false);
+        combat.apply(Event::You { id: 421 }, 1);
+        combat.apply_hit(&hit(421, 9, 100, 10), 1);
+        assert_eq!(combat.you(), Some(421));
+        let you = combat
+            .snapshot(1)
+            .players
+            .into_iter()
+            .find(|p| p.you)
+            .expect("the new entity is you");
+        assert_eq!(you.id, 421);
+        assert_eq!(you.name, "Naicha");
+    }
+
+    #[test]
+    fn unlinked_spell_object_damage_folds_into_the_only_sorcerer() {
+        let mut combat = Combat::new();
+        combat.set_name(1, "ImVayne", false);
+        combat.apply_hit(&hit(1, 9, 15_050_000, 100), 0);
+        combat.apply_hit(&hit(50, 9, 15_280_000, 400), 100);
+        combat.apply_hit(&hit(51, 9, 15_390_000, 200), 200);
+        let snap = combat.snapshot(1_000);
+        assert_eq!(snap.players.len(), 1);
+        assert_eq!(snap.players[0].name, "ImVayne");
+        assert_eq!(snap.players[0].damage, 700);
+        let session = combat.session(1_000).unwrap();
+        assert_eq!(session.actors, ["ImVayne"]);
+        assert_eq!(session.players[0].total, 700);
+    }
+
+    #[test]
+    fn a_spell_object_with_two_sorcerers_folds_only_when_the_family_is_unique() {
+        let mut combat = Combat::new();
+        combat.set_name(1, "ImVayne", false);
+        combat.set_name(2, "Kairodar", false);
+        combat.apply_hit(&hit(1, 9, 15_050_000, 100), 0);
+        combat.apply_hit(&hit(2, 9, 15_060_000, 100), 0);
+        combat.apply_hit(&hit(50, 9, 15_280_000, 400), 100);
+        let mid = combat.snapshot(1_000);
+        assert!(mid.players.iter().any(|p| p.damage == 400 && p.name != "ImVayne" && p.name != "Kairodar"));
+        combat.apply_hit(&hit(1, 9, 15_280_000, 50), 200);
+        let snap = combat.snapshot(2_000);
+        let you = snap.players.iter().find(|p| p.name == "ImVayne").unwrap();
+        assert_eq!(you.damage, 550);
+        assert!(snap.players.iter().all(|p| p.name != "Unknown" || p.damage == 0));
     }
 
     fn name(id: i32, name: &str, trusted: bool) -> Event {

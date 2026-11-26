@@ -73,6 +73,32 @@ pub fn spirit_family(id: i32) -> Option<&'static str> {
         .find(|family| name.contains(family) && name.contains("Spirit"))
 }
 
+/// Ground-spell objects a Sorcerer leaves behind. Damage is dealt by a
+/// separate entity and should be folded into the caster, like a spirit pet.
+/// Confirmed from captures and session logs: Bittercold Wind, Fire Wall,
+/// Cold Storm (`decode.rs` also names the first and last as ground spells).
+const SPELL_OBJECT_NAMES: &[&str] = &["Bittercold Wind", "Fire Wall", "Cold Storm"];
+
+/// A tick or hit from a Sorcerer ground-spell object, not the caster's own skill.
+pub fn is_spell_object_skill(id: i32) -> bool {
+    let name = skill_name(id);
+    SPELL_OBJECT_NAMES.iter().any(|wanted| name == *wanted)
+}
+
+/// The object skill's family name, when this id is a ground-spell object.
+pub fn spell_object_family(id: i32) -> Option<&'static str> {
+    let name = skill_name(id);
+    SPELL_OBJECT_NAMES.iter().copied().find(|wanted| name == *wanted)
+}
+
+/// A Sorcerer's own spell, not a ground-spell object's ticks.
+pub fn is_sorcerer_skill(id: i32) -> bool {
+    if is_spell_object_skill(id) {
+        return false;
+    }
+    crate::skill_icons::class_of(id) == Some("Sorcerer")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +137,18 @@ mod tests {
         assert!(is_spiritmaster_skill(16_300_000));
         assert!(!is_spirit_skill(16_770_000));
         assert!(is_spiritmaster_skill(16_770_000), "Spirit Communion");
+    }
+
+    #[test]
+    fn sorcerer_ground_spells_are_spell_objects() {
+        assert!(is_spell_object_skill(15_280_000), "Bittercold Wind");
+        assert!(is_spell_object_skill(15_390_000), "Fire Wall");
+        assert!(is_spell_object_skill(15_200_047), "Cold Storm variant");
+        assert_eq!(spell_object_family(15_280_000), Some("Bittercold Wind"));
+        assert!(!is_sorcerer_skill(15_280_000), "the object is not the caster");
+        assert!(is_sorcerer_skill(15_050_000), "Blaze");
+        assert!(is_sorcerer_skill(15_060_000), "Hellfire");
+        assert!(!is_spell_object_skill(15_050_000));
+        assert!(!is_spell_object_skill(15_320_000), "Delayed Explosion stays on the caster");
     }
 }

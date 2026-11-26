@@ -97,7 +97,7 @@ fn decode_loop(rx: Receiver<Segment>, state: Arc<AppState>, mut debug: Option<Ta
             _ => crate::position_debug::Direction::Unknown,
         };
         for frame in framed {
-            let events = decode::parse_packet(&frame.packet);
+            let mut events = decode::parse_packet(&frame.packet);
             let locks = events.iter().any(|event| match event {
                 Event::Hit(hit) => !hit.taken && hit.total() > 0 && hit.skill >= 10_000_000,
                 _ => false,
@@ -108,6 +108,21 @@ fn decode_loop(rx: Receiver<Segment>, state: Arc<AppState>, mut debug: Option<Ta
             let identifies_server = events.iter().any(|event| matches!(event,
                 Event::You { .. } | Event::Name { is_self: true, .. }))
                 || locks;
+            // Client-to-server skill-use packets carry the local player's id
+            // (the same 2A 38 / 2B 38 layout hidden cubes use for position).
+            // After a loading screen this can latch `self_id` on the first
+            // cast if `4A 36` / `33 36` were missed. Applied after the
+            // server-direction check, so a client packet cannot be taken
+            // as the game-server flow.
+            if direction == crate::position_debug::Direction::Client {
+                if let Some((caster, _)) = crate::hidden_cubes::cast_position(&frame.packet) {
+                    if (100..=9_999_999).contains(&caster)
+                        && !events.iter().any(|event| matches!(event, Event::You { id } if *id == caster))
+                    {
+                        events.push(Event::You { id: caster });
+                    }
+                }
+            }
             if identifies_server && cube_flow != Some(flow) {
                 state.with_cubes(|cubes| cubes.reset_world());
                 // A new connection (login, zone or channel change): old buffs are gone.

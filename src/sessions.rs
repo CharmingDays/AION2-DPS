@@ -326,6 +326,7 @@ pub fn load(dir: &Path, id: &str) -> Result<Session, Error> {
     fill_skill_names(&mut session);
     reassign_misattributed_heals(&mut session);
     fold_unlinked_spirit_actors(&mut session);
+    fold_unlinked_spell_object_actors(&mut session);
     Ok(session)
 }
 
@@ -551,6 +552,143 @@ fn fold_unlinked_spirit_actors(session: &mut Session) {
             from.share = 0.0;
         }
         if session.you == Some(*spirit) {
+            session.you = Some(*dest);
+        }
+    }
+    let duration = session.duration_ms;
+    let group = session.totals.total_damage;
+    for player in &mut session.players {
+        player.dps = if duration <= 0 {
+            0
+        } else {
+            player.total.saturating_mul(1000) / duration
+        };
+        player.hps = if duration <= 0 {
+            0
+        } else {
+            player.heal.saturating_mul(1000) / duration
+        };
+        player.share = if group > 0 {
+            (player.total as f64 * 1000.0 / group as f64).round() / 10.0
+        } else {
+            0.0
+        };
+    }
+    compact_unused_actors(session);
+}
+
+/// Unlinked Sorcerer ground-spell rows (only Bittercold Wind, Fire Wall, or
+/// Cold Storm) are folded into the Sorcerer when that assignment is
+/// unambiguous: one Sorcerer in the session, or, with several, the one
+/// whose own or already-folded skills uniquely match the object's family.
+fn fold_unlinked_spell_object_actors(session: &mut Session) {
+    let n = session.actors.len();
+    if n == 0 {
+        return;
+    }
+    let skills_of = |session: &Session, i: u32| -> Vec<i32> {
+        session
+            .events
+            .iter()
+            .filter(|event| event.1 == i)
+            .map(|event| event.4)
+            .chain(
+                session
+                    .heals
+                    .iter()
+                    .filter(|heal| heal.1 == i)
+                    .map(|heal| heal.4),
+            )
+            .collect()
+    };
+    let mages: Vec<u32> = (0..n as u32)
+        .filter(|i| {
+            skills_of(session, *i)
+                .iter()
+                .any(|skill| crate::skills::is_sorcerer_skill(*skill))
+        })
+        .collect();
+    if mages.is_empty() {
+        return;
+    }
+    let dest_for = |object: u32| -> Option<u32> {
+        let skills = skills_of(session, object);
+        if skills.is_empty()
+            || !skills
+                .iter()
+                .all(|skill| crate::skills::is_spell_object_skill(*skill))
+        {
+            return None;
+        }
+        if mages.len() == 1 {
+            return Some(mages[0]);
+        }
+        let mut families = Vec::new();
+        for skill in &skills {
+            if let Some(family) = crate::skills::spell_object_family(*skill) {
+                if !families.contains(&family) {
+                    families.push(family);
+                }
+            }
+        }
+        if families.is_empty() {
+            return None;
+        }
+        let matches: Vec<u32> = mages
+            .iter()
+            .copied()
+            .filter(|mage| {
+                let mage_skills = skills_of(session, *mage);
+                families.iter().all(|family| {
+                    mage_skills
+                        .iter()
+                        .any(|skill| crate::skills::spell_object_family(*skill) == Some(*family))
+                })
+            })
+            .collect();
+        (matches.len() == 1).then_some(matches[0])
+    };
+
+    let mut moves: Vec<(u32, u32)> = Vec::new();
+    for object in 0..n as u32 {
+        if let Some(dest) = dest_for(object) {
+            if dest != object {
+                moves.push((object, dest));
+            }
+        }
+    }
+    if moves.is_empty() {
+        return;
+    }
+    for (object, dest) in &moves {
+        for event in &mut session.events {
+            if event.1 == *object {
+                event.1 = *dest;
+            }
+        }
+        for heal in &mut session.heals {
+            if heal.1 == *object {
+                heal.1 = *dest;
+            }
+        }
+        for row in &mut session.stagger {
+            if row.1 == *object {
+                row.1 = *dest;
+            }
+        }
+        let from = session.players.get(*object as usize).cloned();
+        if let (Some(from), Some(to)) = (from, session.players.get_mut(*dest as usize)) {
+            to.total += from.total;
+            to.heal += from.heal;
+        }
+        if let Some(from) = session.players.get_mut(*object as usize) {
+            from.total = 0;
+            from.heal = 0;
+            from.dps = 0;
+            from.hps = 0;
+            from.share = 0.0;
+        }
+        if session.you == Some(*object) {
             session.you = Some(*dest);
         }
     }
@@ -1078,6 +1216,62 @@ mod tests {
         std::fs::write(dir.join(format!("{id}.json")), serde_json::to_string(&session).unwrap()).unwrap();
         let loaded = load(&dir, id).unwrap();
         assert_eq!(loaded.actors, ["Xia"]);
+        assert_eq!(loaded.players[0].total, 700);
+        assert_eq!(loaded.events.iter().map(|e| e.1).collect::<Vec<_>>(), [0, 0, 0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_folds_unlinked_spell_object_rows_into_the_only_sorcerer() {
+        let dir = temp_dir("spell-object-fold");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = sample(1_700_000_000_000, "Siliator of Deceit");
+        session.duration_ms = 10_000;
+        session.actors = vec!["ImVayne".into(), "Unknown".into(), "Unknown".into()];
+        session.players = vec![
+            Player {
+                name: "ImVayne".into(),
+                total: 100,
+                dps: 10,
+                share: 14.3,
+                crit_pct: 0.0,
+                heal: 0,
+                hps: 0,
+                stagger: 0.0,
+            },
+            Player {
+                name: "Unknown".into(),
+                total: 400,
+                dps: 40,
+                share: 57.1,
+                crit_pct: 0.0,
+                heal: 0,
+                hps: 0,
+                stagger: 0.0,
+            },
+            Player {
+                name: "Unknown".into(),
+                total: 200,
+                dps: 20,
+                share: 28.6,
+                crit_pct: 0.0,
+                heal: 0,
+                hps: 0,
+                stagger: 0.0,
+            },
+        ];
+        session.events = vec![
+            Event(0, 0, 100, 0, 15_050_000),
+            Event(100, 1, 400, 0, 15_280_000),
+            Event(200, 2, 200, 0, 15_390_000),
+        ];
+        session.heals.clear();
+        session.totals.total_damage = 700;
+        session.totals.total_heal = 0;
+        let id = "20231114-221320-siliator-of-deceit";
+        std::fs::write(dir.join(format!("{id}.json")), serde_json::to_string(&session).unwrap()).unwrap();
+        let loaded = load(&dir, id).unwrap();
+        assert_eq!(loaded.actors, ["ImVayne"]);
         assert_eq!(loaded.players[0].total, 700);
         assert_eq!(loaded.events.iter().map(|e| e.1).collect::<Vec<_>>(), [0, 0, 0]);
         let _ = std::fs::remove_dir_all(&dir);
